@@ -1,0 +1,81 @@
+# Torn Watch Geek
+
+A Torn userscript for **Torn PDA** (also works in Tampermonkey). It does two jobs:
+
+- **👁 Watch** players: online/offline, hospital, jail, flights with landing times, and new bazaar or Item Market listings.
+- **🎯 Hunt** for mug targets: rich sellers, sleeping workers in high-paying companies, and your own advanced search. Every result shows estimated battle stats and a win chance.
+
+It only reads data. Profile, Attack and Bazaar buttons just open the page. It never attacks, buys, sells or clicks anything for you.
+
+## Install
+
+**Torn PDA:** Settings → Userscripts → **+** → Remote load/update → paste this link → Configure:
+
+```
+https://raw.githubusercontent.com/SarcasticGeekJr/torn-watch-geek/main/torn-watch-geek.user.js
+```
+
+- Set injection time to **END**.
+- When PDA asks about the API key, tap **Add** to use your PDA key. A **Public** key is enough.
+- For battle stats, register your key once at **ffscouter.com**. It's the same free service the FF Scouter script uses.
+
+**Tampermonkey:** open the link above and tap Install.
+
+Updates: Torn PDA checks when the app starts (or Settings → Userscripts → ⟳). Tampermonkey checks about daily. Your version is in ⚙ → About.
+
+## What it does
+
+### 👁 Watch
+- Open someone's profile, tap the 👁 button, then **⭐ Watch this player**. You can also type their ID.
+- Each player shows a 🟢 online / 🟡 idle / ⚪ offline dot, their status and "active 3m ago".
+- Hospital and jail show the time left.
+- **Flights:** `✈ Japan · lands 14:10–15:50`
+  - As time passes, ticket types that would already have landed are ruled out.
+  - After one full flight it learns their ticket (Standard, Airstrip, WLT or Business). After that the time is close to exact: `lands ~15:23 (in 42m, WLT)`.
+  - Flight times are the same table Torn PDA uses (Torn wiki).
+- **Bazaar:** checks their bazaar every 5 min. `listed 50× Xanax @ $830k` · `sold or removed 20× Xanax (~$16.6M)`
+- **Item Market:** when you open an item on the Item Market, a watched player's listing gets a yellow outline and goes in their log.
+- Pop-up alerts (and vibration) for the things you pick in ⚙. Everything also goes in **🔔 Feed**.
+
+### 🎯 Hunt
+**💰 Rich sellers:** players who sold at least $X in the last N hours.
+- Sales are spotted by comparing bazaar stock over time: popular items on TornW3B every 10 minutes, your watched players' bazaars, and Item Market pages you open.
+- Shows a rough mug estimate. Bazaar and Item Market money goes to cash on hand.
+- Also lists Torn's own "top-earning bazaars this week".
+
+**😴 Sleeping workers:** inactive employees of high-paying companies. Their daily wages pile up as cash on hand.
+- Pick company types (Oil Rig and Mining Corporation are selected by default), days inactive (default 14) and minimum stars.
+- It checks the highest-income companies first and lists inactive workers with a rough "unbanked pay" estimate. The estimate only counts days since they joined that company.
+- The director may have fired them or cut their pay, so treat the money as a guess.
+
+**🔎 Search:** your own advanced search, no Donator Pack needed.
+- First tap **➕ Find more players**. It builds a players list on your phone from the Hall of Fame (networth, offences, level) and faction member lists, 100 players per API call.
+- Filters: name, faction, level, inactive days, days old, offences, networth, gender, property, company type, company stars, max battle stats, win chance, Okay only, hide 7★ clothing store workers (−75% mug), hide players you mugged recently.
+- Quick filters run instantly on the saved list. The top results then get a fresh profile check (1 API call each) for status, gender, property, company and stars.
+
+### Stats and win chance
+- Estimated battle stats and Fair Fight come from **FF Scouter**.
+- Optional **Torn Stats** key: shows real spy reports on a player's page when your faction has one.
+- Win chance: 🟢 Easy · 🟡 Likely · 🟠 Risky · 🔴 Avoid. Add your total battle stats in ⚙ for a better guess.
+- Tap **💰** on a target after a mug. They're hidden from Hunt for a few days.
+
+## API use
+- All Torn API calls go through one queue, capped at **30 a minute** by default (change it in ⚙). Torn allows 100 a minute shared by all your tools.
+- Watched players: 1 call per player per check (default every 60s) plus 1 per bazaar check (every 5 min).
+- Hunt only uses calls when you tap a button.
+- It only runs while Torn is open. It can't alert you when the app is closed.
+
+## Limits
+- The Torn API doesn't say who listed on the Item Market. Sellers are only seen on Item Market pages you open.
+- The Torn API doesn't give landing times. They're worked out from when the flight was first seen.
+- Battle stats, wages and cash on hand are estimates.
+- Search only finds players the script has seen (Hall of Fame, factions, companies, sellers). Torn has no "list every player" option.
+
+## Data sources
+- Torn API v1: `user` profile and bazaar, `company` companies and profile, `torn` companies.
+- Torn API v2: `torn/hof`, `faction/{id}/members`, `market/bazaar`.
+- [FF Scouter](https://ffscouter.com) for stat estimates.
+- [Torn Stats](https://www.tornstats.com) spies (optional).
+- [TornW3B](https://weav3r.dev) bazaar listings.
+
+Settings and saved data live in your browser's localStorage under `twg_`. Reinstalling keeps them.
