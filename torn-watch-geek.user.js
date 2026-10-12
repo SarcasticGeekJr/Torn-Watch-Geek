@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Watch Geek
 // @namespace    https://github.com/SarcasticGeekJr/torn-watch-geek
-// @version      1.4.0
+// @version      1.4.1
 // @description  Watch players (online, hospital, jail, flight landing times, bazaar and Item Market listings) and find mug targets: rich sellers, sleeping workers in high-paying companies, and your own advanced search, all with estimated battle stats and win chance. Built for Torn PDA, works in Tampermonkey too.
 // @author       SarcasticGeekJr
 // @match        https://www.torn.com/*
@@ -48,7 +48,7 @@
 
   // ---------------------------------------------------------------- config
   const PDA_KEY = "###PDA-APIKEY###"; // Torn PDA replaces this with your key at runtime
-  const VERSION = "1.4.0"; // keep in sync with @version above
+  const VERSION = "1.4.1"; // keep in sync with @version above
   const UPDATE_URL = "https://raw.githubusercontent.com/SarcasticGeekJr/torn-watch-geek/main/torn-watch-geek.user.js";
   const TORN = "https://api.torn.com";
   const FFS = "https://ffscouter.com/api/v1/get-stats";
@@ -438,21 +438,23 @@
     return { known, manual: !!t.manual, single: !!tk, how: tk ? tk.how : "", lo: Math.min(...opts.map((o) => o.lo)), hi: Math.max(...opts.map((o) => o.hi)), opts };
   }
   // Careful wording: only claim what is known.
-  function travelLine(w) {
+  // where: "row" (Watch list, tap opens the player) or "page" (player page, box is below).
+  function travelLine(w, where) {
     const s = w.s || {};
     if (!s.trip) return "";
-    const where = s.trip.dir === "back" ? "Torn" : s.trip.country || "?";
+    const dest = s.trip.dir === "back" ? "Torn" : s.trip.country || "?";
     const e = tripEstimate(w);
-    if (!e) return `✈️ ${esc(where)}`;
-    if (e.unknown) return `✈️ ${esc(where)} · should land any minute`;
+    if (!e) return `✈️ ${esc(dest)}`;
+    if (e.unknown) return `✈️ ${esc(dest)} · should land any minute`;
     const tk = e.single ? ` · ${TICKETS[e.opts[0].k]}` : "";
     const src = e.manual ? "take-off time you entered" : "";
-    if (!e.known) return `✈️ ${esc(where)}${tk} · could land any time until ${clock(e.hi)} <small class="muted">(didn't see take-off)</small>`;
+    if (!e.known)
+      return `✈️ ${esc(dest)}${tk} · Landing time unknown<br><span class="muted tl2">Already flying when tracking started. Latest possible landing: ${clock(e.hi)}. ${where === "page" ? "Enter the take-off time below if you know it." : "Tap to enter take-off time."}</span>`;
     if (e.single) {
       const o = e.opts[0];
-      return `✈️ ${esc(where)}${tk} · lands ~${clock(o.mid)} <small class="muted">(in ${dur(o.mid - now())}${src ? ", " + src : ""})</small>`;
+      return `✈️ ${esc(dest)}${tk} · lands ~${clock(o.mid)} <small class="muted">(in ${dur(o.mid - now())}${src ? ", " + src : ""})</small>`;
     }
-    return `✈️ ${esc(where)} · lands between ${clock(Math.max(e.lo, now()))} and ${clock(e.hi)}${src ? ` <small class="muted">(${src})</small>` : ""}`;
+    return `✈️ ${esc(dest)} · lands between ${clock(Math.max(e.lo, now()))} and ${clock(e.hi)}${src ? ` <small class="muted">(${src})</small>` : ""}`;
   }
   // Ask Torn's v2 profile for the plane type when v1 didn't include it (1 call per flight at most).
   async function fetchPlane(id) {
@@ -494,7 +496,7 @@
       if (cur.trip && tripKey(prev.trip) !== tripKey(cur.trip)) {
         w.trip = { dir: cur.trip.dir, country: cur.trip.country, depLo: fresh && !prev.trip ? prevSeen : 0, depHi: t, plane: planeOf(p) };
         const e = tripEstimate(w);
-        event(id, "travel", (cur.trip.dir === "back" ? `flying back to Torn from ${cur.trip.country}` : `flying to ${cur.trip.country}`) + (e && !e.unknown && e.known ? ` · lands ${clock(e.lo)}–${clock(e.hi)}` : ""));
+        event(id, "travel", (cur.trip.dir === "back" ? `flying back to Torn from ${cur.trip.country}` : `flying to ${cur.trip.country}`) + (e && !e.unknown && e.known ? ` · lands ${clock(e.lo)}–${clock(e.hi)}` : " (already in the air when tracking started)"));
       }
       if (prev.trip && !cur.trip) {
         const trip = w.trip;
@@ -1407,7 +1409,7 @@
   function watchRow(id) {
     const w = W[id];
     const b = statusBits(w.s);
-    const trav = travelLine(w);
+    const trav = travelLine(w, "row");
     return `<button class="row" data-act="player" data-id="${id}">
       <span class="dot ${b.dot}"></span>
       <span class="nm">${esc(w.name || "#" + id)} <small>${w.level ? "Lv " + w.level + " · " : ""}${b.la ? "active " + b.la : ""}${w.err ? ` · <span class="r">${esc(w.err)}</span>` : ""}</small>
@@ -1462,7 +1464,7 @@
       </div>
       ${
         est && !est.unknown
-          ? `<div class="box"><b>${travelLine(w)}</b>
+          ? `<div class="box"><b>${travelLine(w, "page")}</b>
           ${!est.single ? `<div class="small muted">${est.known ? "If they flew" : "Latest landing if they flew"}: ${est.opts.map((o) => `${TICKETS[o.k]} ${est.known ? "~" + clock(o.mid) : "by " + clock(o.hi)}`).join(" · ")}</div>` : ""}
           <div class="small muted">${planeNote(w)}</div>
           ${
@@ -2827,6 +2829,7 @@ input:focus, select:focus { border-color: var(--acc); }
 .row small { display: block; font-weight: 400; font-size: 11px; color: var(--muted); }
 .row small.trav { color: var(--acc); font-size: 12px; }
 .row small.trav small { display: inline; }
+.row small.trav .tl2, .box .tl2 { display: block; font-weight: 400; font-size: 12px; margin-top: 2px; }
 .row .rt { text-align: right; flex: none; max-width: 48%; }
 .row .rt small { margin-top: 3px; }
 .row.ev { align-items: flex-start; }

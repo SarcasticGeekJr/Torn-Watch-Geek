@@ -32,7 +32,7 @@ Updates: Torn PDA checks when the app starts (or Settings → Userscripts → �
 - **Flights:**
   - Take-off seen: `✈ Japan · lands between 14:10 and 15:50`. Tickets that would already have landed are ruled out as time passes.
   - Ticket known: `✈ Japan · WLT · lands ~15:23 (in 42m)`. The ticket comes from the plane type Torn shows for the flight, or from what it learned on a past flight.
-  - Take-off not seen (started watching mid-flight): `✈ Switzerland · Airstrip · could land any time until 18:12 (didn't see take-off)`.
+  - Take-off not seen (started watching mid-flight): `✈ Switzerland · Landing time unknown` with `Already flying when tracking started. Latest possible landing: 8:11 pm. Tap to enter take-off time.`
   - If you know when they took off, enter it on their page ("took off at…" or "… minutes ago") and the landing time is worked out from that.
   - It learns which plane type means which ticket from real flights.
   - Flight times are the same table Torn PDA uses (Torn wiki).
