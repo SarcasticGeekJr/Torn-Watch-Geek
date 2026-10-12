@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Watch Geek
 // @namespace    https://github.com/SarcasticGeekJr/torn-watch-geek
-// @version      1.1.1
+// @version      1.1.2
 // @description  Watch players (online, hospital, jail, flight landing times, bazaar and Item Market listings) and find mug targets: rich sellers, sleeping workers in high-paying companies, and your own advanced search, all with estimated battle stats and win chance. Built for Torn PDA, works in Tampermonkey too.
 // @author       SarcasticGeekJr
 // @match        https://www.torn.com/*
@@ -48,7 +48,7 @@
 
   // ---------------------------------------------------------------- config
   const PDA_KEY = "###PDA-APIKEY###"; // Torn PDA replaces this with your key at runtime
-  const VERSION = "1.1.1"; // keep in sync with @version above
+  const VERSION = "1.1.2"; // keep in sync with @version above
   const UPDATE_URL = "https://raw.githubusercontent.com/SarcasticGeekJr/torn-watch-geek/main/torn-watch-geek.user.js";
   const TORN = "https://api.torn.com";
   const FFS = "https://ffscouter.com/api/v1/get-stats";
@@ -1496,7 +1496,7 @@
       return;
     }
     const shown = rs.filter((r) => !r.hidden);
-    box.innerHTML = shown.length ? shown.slice(0, 80).map(resultCard).join("") : `<p class="muted hint">No players match. Try looser filters${S.hunt === "search" ? " or tap “Find more players”" : ""}.</p>`;
+    box.innerHTML = shown.length ? shown.slice(0, 80).map(resultCard).join("") : `<p class="muted hint">No players match. Try looser filters${S.hunt === "search" ? " or tap 'Find more players'" : ""}.</p>`;
   }
   const drawSoon = (() => {
     let t = 0;
@@ -1796,7 +1796,7 @@
       <label class="tog">Hide players I mugged in the last<input class="num" data-f="hideMugged" type="number" inputmode="numeric" value="${esc(f.hideMugged)}"> days</label>
       <label class="tog">Check details of the top<input class="num" data-f="check" type="number" inputmode="numeric" value="${esc(f.check)}"> results</label>
       <div class="row-btn"><button class="btn" data-act="searchGo">Search</button><button class="btn ghost" data-act="grow" ${growBusy ? "disabled" : ""}>➕ Find more players</button></div>
-      <p class="muted small">Searching <b>${n.toLocaleString()}</b> players saved on this phone. “Find more players” uses ${S.grow.calls} API calls and adds up to ${S.grow.calls * 100} from the Hall of Fame and faction lists. <span class="grow-msg">${esc(growMsg)}</span></p>`;
+      <p class="muted small">Searching <b>${n.toLocaleString()}</b> players saved on this phone. 'Find more players' uses ${S.grow.calls} API calls and adds up to ${S.grow.calls * 100} from the Hall of Fame and faction lists. <span class="grow-msg">${esc(growMsg)}</span></p>`;
     bindForm(f);
     if (!CTYPES && apiKey()) companyTypes().then(() => S.hunt === "search" && view.name === "hunt" && !root.activeElement && searchForm()).catch(() => {});
   }
@@ -1865,7 +1865,7 @@
     const all = Object.entries(DB).filter(([id, p]) => matchCheap(+id, p, f));
     if (!all.length) {
       view.results = { mode: "search", list: [] };
-      view.msg = Object.keys(DB).length ? "" : "Your players list is empty. Tap “➕ Find more players” first.";
+      view.msg = Object.keys(DB).length ? "" : "Your players list is empty. Tap '➕ Find more players' first.";
       drawResults();
       return;
     }
@@ -1988,7 +1988,7 @@
 
         <h3>Other</h3>
         <button class="btn ghost" data-act="resetFab">Reset 👁️ button position</button>
-        <button class="btn ghost" data-act="clearMugged">Clear “mugged” marks</button>
+        <button class="btn ghost" data-act="clearMugged">Clear 'mugged' marks</button>
 
         <h3>About</h3>
         <div class="about">
