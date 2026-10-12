@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Watch Geek
 // @namespace    https://github.com/SarcasticGeekJr/torn-watch-geek
-// @version      1.2.1
+// @version      1.3.0
 // @description  Watch players (online, hospital, jail, flight landing times, bazaar and Item Market listings) and find mug targets: rich sellers, sleeping workers in high-paying companies, and your own advanced search, all with estimated battle stats and win chance. Built for Torn PDA, works in Tampermonkey too.
 // @author       SarcasticGeekJr
 // @match        https://www.torn.com/*
@@ -48,7 +48,7 @@
 
   // ---------------------------------------------------------------- config
   const PDA_KEY = "###PDA-APIKEY###"; // Torn PDA replaces this with your key at runtime
-  const VERSION = "1.2.1"; // keep in sync with @version above
+  const VERSION = "1.3.0"; // keep in sync with @version above
   const UPDATE_URL = "https://raw.githubusercontent.com/SarcasticGeekJr/torn-watch-geek/main/torn-watch-geek.user.js";
   const TORN = "https://api.torn.com";
   const FFS = "https://ffscouter.com/api/v1/get-stats";
@@ -302,7 +302,7 @@
   let deadKey = "", // the key that failed, until the user changes it
     deadKeyMsg = "";
   async function torn(path, ttl, opts = {}) {
-    const key = apiKey();
+    const key = opts.key || apiKey();
     if (!key) throw new Error("no API key (add one in ⚙️ Settings)");
     if (deadKey && deadKey === key) throw new Error("API key stopped working: " + deadKeyMsg + ". Check it in ⚙️ Settings.");
     const sep = path.includes("?") ? "&" : "?";
@@ -1703,12 +1703,12 @@
     const banked = isBanked(r, m);
     const total = hot ? unbanked(r.pid) : 0;
     const d = DB[r.pid] || {};
-    const mr = hot ? mugRange(total, d.ct, d.co && CO[d.co] ? CO[d.co].stars : 0) : null;
+    const mr = hot ? mugRange(total * learnFactor("live").f, d.ct, d.co && CO[d.co] ? CO[d.co].stars : 0) : null;
     let status;
     if (r.pending) status = `<span class="muted">checking status…</span>`;
     else if (!r.away) status = `<span class="muted">was around for the sale, probably banked</span>`;
     else if (banked) status = `<span class="muted">came back ${m && m.la ? ago(m.la * 1000) : ""}, probably banked</span>`;
-    else if (hot) status = `<span class="hot">🔥 ${esc(awayText(r, m))}</span>${total > r.v ? ` · unbanked ~<b>${short(total)}</b>` : ""}${mr ? ` · mug ~${short(mr[0])}–${short(mr[1])}` : ""}`;
+    else if (hot) status = `<span class="hot">🔥 ${esc(awayText(r, m))}</span>${total > r.v ? ` · unbanked ~<b>${short(total)}</b>` : ""}${mr ? ` · mug ~${short(mr[0])}–${short(mr[1])}${learnedNote("live")}` : ""}`;
     else status = `<span class="muted">${m && m.on === "Online" ? "online" : m && m.on ? "active " + ago(m.la * 1000) : ""}</span>`;
     return `<div class="card lrow ${hot ? "hotrow" : ""} ${banked ? "dim" : ""}">
       <div class="crow">
@@ -1781,7 +1781,112 @@
     const inact = daysSince(p.la);
     if (!co || !co.emp || inact == null || inact < 1) return null;
     const wage = ((co.inc / Math.max(1, co.emp)) * (+S.wageShare || 30)) / 100;
-    return { days: inact, paid: Math.min(inact, p.dic || inact), cash: Math.min(inact, p.dic || inact) * wage, co };
+    const raw = Math.min(inact, p.dic || inact) * wage;
+    return { days: inact, paid: Math.min(inact, p.dic || inact), raw, cash: raw * learnFactor("worker").f, co };
+  }
+
+  // ---------------------------------------------------------------- Learning from your mugs
+  // When you open an attack from the script, it remembers what it guessed the target was holding.
+  // When the mug result shows up (on the attack page you're looking at, or in your events with a
+  // Limited key), it works out the cash they really had and keeps a running correction per kind
+  // of target: "worker" (unbanked pay guess) and "live" (sales made while away).
+  const LEARN = store.get("learn", { worker: [], live: [], log: [], pending: {}, evT: 0 });
+  const saveLearn = () => store.set("learn", LEARN);
+  const MIN_SAMPLES = 3;
+  function learnFactor(src) {
+    const xs = (LEARN[src] || []).slice(-15);
+    if (xs.length < MIN_SAMPLES) return { f: 1, n: xs.length };
+    const sorted = [...xs].sort((a, b) => a - b);
+    return { f: sorted[Math.floor(sorted.length / 2)], n: xs.length }; // median: one odd mug can't swing it
+  }
+  const learnedNote = (src) => {
+    const L = learnFactor(src);
+    return L.n >= MIN_SAMPLES ? ` <span class="muted">(learned from ${L.n} mugs)</span>` : "";
+  };
+  // What the script would guess right now for this player, before learning: { src, raw }.
+  function rawGuess(pid) {
+    const away = unbanked(pid);
+    if (away > 0) return { src: "live", raw: away };
+    const up = unbankedPay(DB[pid] || {});
+    if (up && up.days >= 2) return { src: "worker", raw: up.raw };
+    return null;
+  }
+  function rememberAttack(pid) {
+    pid = +pid;
+    if (!pid) return;
+    const g = rawGuess(pid);
+    LEARN.pending[pid] = { t: now(), src: g ? g.src : "", raw: g ? g.raw : 0, name: (DB[pid] && DB[pid].n) || (W[pid] && W[pid].name) || "" };
+    for (const [k, v] of Object.entries(LEARN.pending)) if (now() - v.t > 3 * HOUR) delete LEARN.pending[k];
+    saveLearn();
+  }
+  function mugPctMid(pid) {
+    const p = DB[pid] || {};
+    const co = p.co ? CO[p.co] : null;
+    const r = mugRange(1, p.ct, co ? co.stars : 0);
+    return r ? (r[0] + r[1]) / 2 : 0.075;
+  }
+  function recordMug(pid, amount, how) {
+    pid = +pid;
+    amount = Math.round(+amount || 0);
+    if (!pid || !amount) return;
+    const key = pid + ":" + amount;
+    if (LEARN.log.some((l) => l.key === key && now() - l.t < 6 * HOUR)) return; // seen already (page + events)
+    const pend = LEARN.pending[pid];
+    const cash = amount / mugPctMid(pid);
+    const entry = { key, t: now(), pid, name: (pend && pend.name) || (DB[pid] && DB[pid].n) || "#" + pid, amount, cash, how, src: pend ? pend.src : "", guess: pend ? pend.raw : 0 };
+    if (pend && pend.src && pend.raw > 0) {
+      const ratio = Math.max(0.001, Math.min(100, cash / pend.raw));
+      LEARN[pend.src] = [...(LEARN[pend.src] || []), ratio].slice(-15);
+      entry.ratio = ratio;
+    }
+    delete LEARN.pending[pid];
+    LEARN.log = [entry, ...LEARN.log].slice(0, 20);
+    saveLearn();
+    MUGGED[pid] = now();
+    saveSoon("mugged");
+    toast(`💰 Mug of ${short(amount)} noted${entry.ratio ? ". Guesses adjusted" : ""}`, "ok", 3500);
+  }
+
+  // Attack page (only while you're looking at it): "...mugged NAME for $29,511" or similar.
+  let atkTimer = 0;
+  function scanAttackPage() {
+    if (document.hidden || !/sid=attack/i.test(location.href)) return;
+    const pid = +((location.href.match(/user2ID=(\d+)/i) || [])[1] || 0);
+    if (!pid) return;
+    const txt = (document.body.innerText || "").replace(/\s+/g, " ");
+    const m = txt.match(/\bmugg(?:ed|ing)\b[^$]{0,80}\$\s?([\d,]{1,15})/i) || txt.match(/\$\s?([\d,]{1,15})[^$]{0,40}\bmugg/i);
+    if (m) recordMug(pid, +m[1].replace(/,/g, ""), "attack page");
+  }
+
+  // Events (needs a Limited key): "...attacking <a href=...XID=123>name</a> and mugged them for $29,511"
+  let evBusy = false;
+  async function checkMugEvents(force) {
+    if (evBusy || document.hidden) return;
+    const pend = Object.keys(LEARN.pending).length;
+    if (!force && !pend) return;
+    if (!force && now() - (LEARN.evT || 0) < 2 * MIN) return;
+    const key = (S.eventsKey || "").trim() || apiKey();
+    if (!key) return;
+    evBusy = true;
+    LEARN.evT = now();
+    try {
+      const d = await torn(`/user/?selections=events`, 60 * SEC, { key });
+      let evs = d.events || {};
+      evs = Array.isArray(evs) ? evs : Object.values(evs);
+      LEARN.evErr = "";
+      for (const e of evs) {
+        const text = String(e.event || "");
+        const ts = (+e.timestamp || 0) * 1000;
+        if (now() - ts > 6 * HOUR) continue;
+        const m = text.match(/XID=(\d+)[\s\S]*?mugged them for \$([\d,]+)/i);
+        if (m) recordMug(+m[1], +m[2].replace(/,/g, ""), "events");
+      }
+    } catch (e) {
+      LEARN.evErr = /access level/i.test(e.message) ? "Events need a Limited key (add it in ⚙️ Settings)." : e.message;
+    } finally {
+      evBusy = false;
+      saveLearn();
+    }
   }
 
   // --- 🔎 Search (your own advanced search)
@@ -2006,7 +2111,7 @@
       if (up && up.days >= 2) {
         const mLo = mugRange(up.cash * 0.5, up.co.type, up.co.stars),
           mHi = mugRange(up.cash * 1.5, up.co.type, up.co.stars);
-        bits.unshift(`😴 Inactive <b>${Math.floor(up.days)}d</b> at ${esc(up.co.n || "")} (${up.co.stars}★)${up.paid < up.days ? ` · hired ${Math.floor(up.paid)}d ago` : ""} · est. unbanked pay ~<b>${short(up.cash * 0.5)}–${short(up.cash * 1.5)}</b>${mLo ? ` · mug ~${short(mLo[0])}–${short(mHi[1])}` : ""}<br>`);
+        bits.unshift(`😴 Inactive <b>${Math.floor(up.days)}d</b> at ${esc(up.co.n || "")} (${up.co.stars}★)${up.paid < up.days ? ` · hired ${Math.floor(up.paid)}d ago` : ""} · est. unbanked pay ~<b>${short(up.cash * 0.5)}–${short(up.cash * 1.5)}</b>${mLo ? ` · mug ~${short(mLo[0])}–${short(mHi[1])}` : ""}${learnedNote("worker")}<br>`);
       }
       return bits.join(" · ").replace("<br> · ", "<br>");
     };
@@ -2055,9 +2160,21 @@
       ["Data sharing", "Nobody. Player IDs you look up go to FF Scouter for stat estimates (if turned on)"],
       ["Purpose of use", "Competitive advantage: tracking players and finding mug targets (players holding cash after bazaar / Item Market sales, inactive workers)"],
       ["Key storage & sharing", "Stored locally / Shared with FF Scouter (stat estimates, can be turned off)"],
-      ["Key access level", "Public. Limited is only used, if you have it, to read your own battle stats"],
+      ["Key access level", "Public. Limited is only used, if you have it, to read your own battle stats and your own events (mug results)"],
     ];
     return `<details class="more tos"><summary>API key terms of use (Torn ToS)</summary><table class="tos-t">${rows.map(([a, b]) => `<tr><th>${a}</th><td>${b}</td></tr>`).join("")}</table></details>`;
+  }
+  function learnBox() {
+    const w = learnFactor("worker"),
+      l = learnFactor("live");
+    const fmt = (x, name) => (x.n >= MIN_SAMPLES ? `${name} guesses × <b>${x.f < 0.1 ? x.f.toFixed(3) : x.f.toFixed(2)}</b> (from ${x.n} mugs)` : `${name}: learning (${x.n}/${MIN_SAMPLES} mugs)`);
+    return `<p class="small">${fmt(w, "Worker pay")} · ${fmt(l, "Live sales")}</p>
+      <p class="muted small">Open attacks with the script's Attack button. After the mug, the amount is read from the attack page${(S.eventsKey || "").trim() ? " and your events" : " (add a Limited key above to also read your events)"}, and the guesses adjust by themselves.${LEARN.evErr ? ` <span class="r">${esc(LEARN.evErr)}</span>` : ""}</p>
+      ${LEARN.log.length ? `<div class="mini-list">${LEARN.log
+        .slice(0, 8)
+        .map((g) => `<div><span>${esc(g.name)} <small class="muted">${ago(g.t)} · ${esc(g.how)}${g.guess ? ` · guessed ~${short(g.guess)}, had ~${short(g.cash)}` : ""}</small></span><b>${short(g.amount)}</b></div>`)
+        .join("")}</div>` : ""}
+      <div class="row-btn"><button class="btn ghost" data-act="evCheck">Check my events now</button><button class="btn ghost" data-act="learnReset">Reset learning</button></div>`;
   }
   function renderSettings() {
     const key = apiKey();
@@ -2078,6 +2195,10 @@
         <label class="blk">Torn Stats key <small class="muted">(optional, for spy reports)</small>
           <input class="key" data-k="tsKey" type="password" autocomplete="off" placeholder="leave empty if you don't use Torn Stats" value="${esc(S.tsKey)}">
         </label>
+        <label class="blk">Limited key for mug results <small class="muted">(optional)</small>
+          <input class="key" data-k="eventsKey" type="password" autocomplete="off" placeholder="leave empty to use the key above" value="${esc(S.eventsKey || "")}">
+        </label>
+        <p class="muted small">Only used to read your own events ("...mugged them for $X") so the script can learn from your mugs. Only sent to api.torn.com.</p>
         <p class="muted small">Only sent to tornstats.com, to read spy reports on a player's page. Their terms: <a href="https://www.tornstats.com" target="_blank" rel="noopener">tornstats.com</a></p>
 
         <h3>API use</h3>
@@ -2106,6 +2227,9 @@
         ${numIn("mugMerits", "Mugging merits (0–10)", 'min="0" max="10"')}
         ${numIn("plunder", "Plunder bonus on my weapon (%)", 'min="0" max="100"')}
         ${numIn("wageShare", "Guess: wages = % of company income per worker", 'min="1" max="100"')}
+
+        <h3>🧠 Learning from your mugs</h3>
+        ${learnBox()}
 
         <h3>TornW3B scanner (finds sellers for Live sales)</h3>
         <label class="tog"><input type="checkbox" data-s="salesScan" ${S.salesScan ? "checked" : ""}> Scan TornW3B bazaars for sales (no API key used)</label>
@@ -2173,6 +2297,7 @@
   root.addEventListener("click", async (e) => {
     const link = e.target.closest("a[href]");
     if (link && /sid=attack/.test(link.getAttribute("href"))) {
+      rememberAttack(+((link.getAttribute("href").match(/user2ID=(\d+)/) || [])[1] || 0));
       try {
         sessionStorage.setItem("twg_reopen", JSON.stringify({ t: now(), tab: S.tab, hunt: S.hunt }));
       } catch {}
@@ -2368,6 +2493,17 @@
         out.innerHTML = `${ok ? "✅ FF Scouter works with this key." : "❌ FF Scouter said no."} <br><span class="muted">Key used: ${esc(key.slice(0, 4))}…${esc(key.slice(-2))} · status ${esc(status)} · reply: ${esc(String(text).slice(0, 220))}</span>`;
         break;
       }
+      case "evCheck":
+        toast("Reading your events…", "busy", 0);
+        await checkMugEvents(true);
+        toast(LEARN.evErr || "Events checked", LEARN.evErr ? "bad" : "ok");
+        render();
+        break;
+      case "learnReset":
+        Object.assign(LEARN, { worker: [], live: [], log: [], pending: {} });
+        saveLearn();
+        render();
+        break;
       case "testAlert":
         showAlert({ t: now(), pid: myId || 1, name: "Test", kind: "land", text: "landed in Japan · flies Airstrip" });
         break;
@@ -2502,6 +2638,7 @@
     setTimeout(pollWatch, 1500);
     setInterval(() => scanSales(false), MIN);
     setInterval(liveTick, 500);
+    setInterval(() => checkMugEvents(false), 30 * SEC);
     setTimeout(() => scanSales(false), 20 * SEC);
     // Live countdowns on the Watch tab
     setInterval(() => isOpen() && (view.name === "watch" || view.name === "player") && renderSoon(), 30 * SEC);
@@ -2518,6 +2655,10 @@
     }, 1000);
     // Item Market: read listings as Torn draws them.
     new MutationObserver(() => {
+      if (/sid=attack/i.test(location.href)) {
+        clearTimeout(atkTimer);
+        atkTimer = setTimeout(scanAttackPage, 600);
+      }
       if (!marketItemId()) return;
       clearTimeout(imTimer);
       imTimer = setTimeout(scanMarketPage, 700);

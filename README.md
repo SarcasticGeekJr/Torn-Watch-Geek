@@ -54,10 +54,16 @@ Updates: Torn PDA checks when the app starts (or Settings → Userscripts → �
 - Filters: name, faction, level, inactive days, days old, offences, networth, gender, property, company type, company stars, max battle stats, win chance, Okay only, hide 7★ clothing store workers (−75% mug), hide players you mugged recently.
 - Quick filters run instantly on the saved list. The top results then get a fresh profile check (1 API call each) for status, gender, property, company and stars.
 
+### 🧠 Learns from your mugs
+- Open attacks with the script's **Attack** button. It remembers how much cash it guessed the target had.
+- After the mug, it reads the amount from the attack page (while you're looking at it), and from your events if you add a **Limited** key in ⚙ Settings.
+- It works out how much they really had and corrects its guesses by itself, separately for worker pay and for live sales. It starts after 3 mugs and uses the middle value of the last 15, so one odd mug can't throw it off.
+- ⚙ Settings → Learning shows what it learned (for example `Worker pay guesses × 0.13 (from 3 mugs)`), your recent mugs, and a Reset button.
+
 ### API key terms (Torn ToS)
 | Data storage | Data sharing | Purpose of use | Key storage & sharing | Key access level |
 |---|---|---|---|---|
-| Only locally | Nobody (player IDs you look up go to FF Scouter, if turned on) | Competitive advantage: tracking players and finding mug targets | Stored locally / Shared with FF Scouter (can be turned off) | Public (Limited only used to read your own battle stats) |
+| Only locally | Nobody (player IDs you look up go to FF Scouter, if turned on) | Competitive advantage: tracking players and finding mug targets | Stored locally / Shared with FF Scouter (can be turned off) | Public (Limited only used to read your own battle stats and your own events, for mug results) |
 
 - FF Scouter terms: [ffscouter.com](https://ffscouter.com). Torn Stats (optional): [tornstats.com](https://www.tornstats.com).
 - If Torn says the key is wrong, paused or disabled, the script stops using it until you change it.
