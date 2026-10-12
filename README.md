@@ -29,9 +29,12 @@ Updates: Torn PDA checks when the app starts (or Settings → Userscripts → �
 - Open someone's profile, tap the 👁 button, then **⭐ Watch this player**. You can also type their ID.
 - Each player shows a 🟢 online / 🟡 idle / ⚪ offline dot, their status and "active 3m ago".
 - Hospital and jail show the time left.
-- **Flights:** `✈ Japan · lands 14:10–15:50`
-  - As time passes, ticket types that would already have landed are ruled out.
-  - After one full flight it learns their ticket (Standard, Airstrip, WLT or Business). After that the time is close to exact: `lands ~15:23 (in 42m, WLT)`.
+- **Flights:**
+  - Take-off seen: `✈ Japan · lands between 14:10 and 15:50`. Tickets that would already have landed are ruled out as time passes.
+  - Ticket known: `✈ Japan · WLT · lands ~15:23 (in 42m)`. The ticket comes from the plane type Torn shows for the flight, or from what it learned on a past flight.
+  - Take-off not seen (started watching mid-flight): `✈ Switzerland · Airstrip · could land any time until 18:12 (didn't see take-off)`.
+  - If you know when they took off, enter it on their page ("took off at…" or "… minutes ago") and the landing time is worked out from that.
+  - It learns which plane type means which ticket from real flights.
   - Flight times are the same table Torn PDA uses (Torn wiki).
 - **Bazaar:** checks their bazaar every 5 min. `listed 50× Xanax @ $830k` · `sold or removed 20× Xanax (~$16.6M)`
 - **Item Market:** when you open an item on the Item Market, a watched player's listing gets a yellow outline and goes in their log.

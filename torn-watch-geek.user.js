@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Watch Geek
 // @namespace    https://github.com/SarcasticGeekJr/torn-watch-geek
-// @version      1.3.0
+// @version      1.4.0
 // @description  Watch players (online, hospital, jail, flight landing times, bazaar and Item Market listings) and find mug targets: rich sellers, sleeping workers in high-paying companies, and your own advanced search, all with estimated battle stats and win chance. Built for Torn PDA, works in Tampermonkey too.
 // @author       SarcasticGeekJr
 // @match        https://www.torn.com/*
@@ -48,7 +48,7 @@
 
   // ---------------------------------------------------------------- config
   const PDA_KEY = "###PDA-APIKEY###"; // Torn PDA replaces this with your key at runtime
-  const VERSION = "1.3.0"; // keep in sync with @version above
+  const VERSION = "1.4.0"; // keep in sync with @version above
   const UPDATE_URL = "https://raw.githubusercontent.com/SarcasticGeekJr/torn-watch-geek/main/torn-watch-geek.user.js";
   const TORN = "https://api.torn.com";
   const FFS = "https://ffscouter.com/api/v1/get-stats";
@@ -396,31 +396,48 @@
   const flightMs = (country, ticket) => (FLIGHT[country] ? FLIGHT[country][ticket] * MIN : 0);
 
   // Which tickets still fit, and when each would land.
+  // Plane type from Torn's player status (the plane picture on their profile while flying).
+  // Learned from real flights first; until then a guess from the name.
+  const PLANES = store.get("planes", {}); // plane type -> [count per ticket]
+  function planeTicket(plane) {
+    if (!plane) return null;
+    const c = PLANES[plane];
+    if (c && c.some((n) => n > 0)) return { k: c.indexOf(Math.max(...c)), how: "learned" };
+    const v = String(plane).toLowerCase();
+    if (/business/.test(v)) return { k: 3, how: "guessed" };
+    if (/private|jet|wlt/.test(v)) return { k: 2, how: "guessed" };
+    if (/light|small|airstrip|prop|cessna/.test(v)) return { k: 1, how: "guessed" };
+    if (/airliner|commercial|standard|passenger/.test(v)) return { k: 0, how: "guessed" };
+    return null;
+  }
+  // Which ticket this trip is on, if known: plane type for this flight, then the one learned for the player.
+  function tripTicket(w) {
+    const pt = w.trip && planeTicket(w.trip.plane);
+    if (pt) return { k: pt.k, how: "plane" };
+    if (w.ticket != null) return { k: w.ticket, how: "learned" };
+    return null;
+  }
   function tripEstimate(w, any) {
     const t = w.trip;
     if (!t || !FLIGHT[t.country]) return null;
-    const learned = w.ticket != null && !any;
-    const tickets = learned ? [w.ticket] : [0, 1, 2, 3];
+    const tk = any ? null : tripTicket(w);
+    const tickets = tk ? [tk.k] : [0, 1, 2, 3];
     const n = now();
+    const known = !!t.depLo; // seen (or told) when they took off
     const opts = [];
     for (const k of tickets) {
       const f = flightMs(t.country, k);
       const lo = (t.depLo || t.depHi) + f * 0.97;
       const hi = t.depHi + f * 1.03 + MIN;
       // A ticket is ruled out once its latest landing has passed while they're still flying.
-      if (t.depLo && hi < n) continue;
-      opts.push({ k, lo, hi, mid: (t.depLo ? (t.depLo + t.depHi) / 2 : t.depHi) + f });
+      if (known && hi < n) continue;
+      opts.push({ k, lo, hi, mid: (known ? (t.depLo + t.depHi) / 2 : t.depHi) + f });
     }
-    // Flying longer than their usual ticket allows: they used a different ticket this time.
-    if (!opts.length) return learned ? tripEstimate(w, true) : { unknown: true };
-    return {
-      known: !!t.depLo,
-      learned,
-      lo: Math.min(...opts.map((o) => o.lo)),
-      hi: Math.max(...opts.map((o) => o.hi)),
-      opts,
-    };
+    // Flying longer than that ticket allows: they used a different ticket this time.
+    if (!opts.length) return tk ? tripEstimate(w, true) : { unknown: true };
+    return { known, manual: !!t.manual, single: !!tk, how: tk ? tk.how : "", lo: Math.min(...opts.map((o) => o.lo)), hi: Math.max(...opts.map((o) => o.hi)), opts };
   }
+  // Careful wording: only claim what is known.
   function travelLine(w) {
     const s = w.s || {};
     if (!s.trip) return "";
@@ -428,14 +445,30 @@
     const e = tripEstimate(w);
     if (!e) return `✈️ ${esc(where)}`;
     if (e.unknown) return `✈️ ${esc(where)} · should land any minute`;
-    if (e.learned && e.known) {
+    const tk = e.single ? ` · ${TICKETS[e.opts[0].k]}` : "";
+    const src = e.manual ? "take-off time you entered" : "";
+    if (!e.known) return `✈️ ${esc(where)}${tk} · could land any time until ${clock(e.hi)} <small class="muted">(didn't see take-off)</small>`;
+    if (e.single) {
       const o = e.opts[0];
-      return `✈️ ${esc(where)} · lands ~${clock(o.mid)} <small class="muted">(in ${dur(o.mid - now())}, ${TICKETS[o.k]})</small>`;
+      return `✈️ ${esc(where)}${tk} · lands ~${clock(o.mid)} <small class="muted">(in ${dur(o.mid - now())}${src ? ", " + src : ""})</small>`;
     }
-    if (!e.known) return `✈️ ${esc(where)} · lands by ${clock(e.hi)} <small class="muted">(seen already flying)</small>`;
-    return `✈️ ${esc(where)} · lands ${clock(Math.max(e.lo, now()))}–${clock(e.hi)}`;
+    return `✈️ ${esc(where)} · lands between ${clock(Math.max(e.lo, now()))} and ${clock(e.hi)}${src ? ` <small class="muted">(${src})</small>` : ""}`;
+  }
+  // Ask Torn's v2 profile for the plane type when v1 didn't include it (1 call per flight at most).
+  async function fetchPlane(id) {
+    const w = W[id];
+    if (!w || !w.trip || w.trip.plane !== undefined) return;
+    w.trip.plane = null; // asked
+    try {
+      const d = await torn(`/v2/user/${id}/profile`, 30 * SEC, {});
+      const st = (d.profile && d.profile.status) || d.status || {};
+      const pl = st.plane_image_type || st.travel_type || null;
+      if (W[id] && W[id].trip) W[id].trip.plane = pl;
+    } catch {}
+    saveSoon("watch");
   }
 
+  const planeOf = (p) => (p && p.status && (p.status.plane_image_type || p.status.travel_type)) || undefined;
   // Called with each fresh profile of a watched player. Works out trips, landings and alerts.
   function updateWatched(id, p) {
     const w = W[id];
@@ -459,7 +492,7 @@
       }
       // Trips
       if (cur.trip && tripKey(prev.trip) !== tripKey(cur.trip)) {
-        w.trip = { dir: cur.trip.dir, country: cur.trip.country, depLo: fresh && !prev.trip ? prevSeen : 0, depHi: t };
+        w.trip = { dir: cur.trip.dir, country: cur.trip.country, depLo: fresh && !prev.trip ? prevSeen : 0, depHi: t, plane: planeOf(p) };
         const e = tripEstimate(w);
         event(id, "travel", (cur.trip.dir === "back" ? `flying back to Torn from ${cur.trip.country}` : `flying to ${cur.trip.country}`) + (e && !e.unknown && e.known ? ` · lands ${clock(e.lo)}–${clock(e.hi)}` : ""));
       }
@@ -478,6 +511,12 @@
           if (fits.length === 1) {
             w.ticket = fits[0];
             learned = ` · flies ${TICKETS[fits[0]]}`;
+            // Teach the plane type -> ticket link from this real flight.
+            if (trip.plane) {
+              PLANES[trip.plane] = PLANES[trip.plane] || [0, 0, 0, 0];
+              PLANES[trip.plane][fits[0]]++;
+              store.set("planes", PLANES);
+            }
           }
         }
         const where = prev.trip.dir === "back" ? "Torn" : prev.trip.country;
@@ -492,7 +531,13 @@
         else if (prev.state === "Jail") event(id, "jail", "left jail" + late);
       }
     } else if (cur.trip) {
-      w.trip = { dir: cur.trip.dir, country: cur.trip.country, depLo: 0, depHi: t };
+      w.trip = { dir: cur.trip.dir, country: cur.trip.country, depLo: 0, depHi: t, plane: planeOf(p) };
+    }
+    if (w.trip && cur.trip) {
+      if (!w.trip.plane && planeOf(p)) w.trip.plane = planeOf(p);
+      // They took off no later than their last action, so that tightens the latest landing.
+      const la = cur.la && cur.la.ts ? cur.la.ts * 1000 : 0;
+      if (!w.trip.depLo && la && la < w.trip.depHi) w.trip.depHi = la;
     }
     w.s = cur;
     w.seenAt = t;
@@ -774,6 +819,7 @@
         getProfile(id, { ttl: 20 * SEC })
           .then(() => {
             W[id] && (W[id].err = "");
+            if (W[id] && W[id].trip && W[id].trip.plane === undefined) fetchPlane(id);
             if (isOpen() && (view.name === "watch" || (view.name === "player" && view.id === +id))) renderSoon();
           })
           .catch((e) => {
@@ -1417,8 +1463,15 @@
       ${
         est && !est.unknown
           ? `<div class="box"><b>${travelLine(w)}</b>
-          ${!est.learned && est.known ? `<div class="small muted">By ticket: ${est.opts.map((o) => `${TICKETS[o.k]} ~${clock(o.mid)}`).join(" · ")}</div>` : ""}
-          ${w.ticket != null ? `<div class="small muted">Learned from a past flight: flies ${TICKETS[w.ticket]}.</div>` : `<div class="small muted">After I see one full flight I'll learn their ticket type and the time gets exact.</div>`}</div>`
+          ${!est.single ? `<div class="small muted">${est.known ? "If they flew" : "Latest landing if they flew"}: ${est.opts.map((o) => `${TICKETS[o.k]} ${est.known ? "~" + clock(o.mid) : "by " + clock(o.hi)}`).join(" · ")}</div>` : ""}
+          <div class="small muted">${planeNote(w)}</div>
+          ${
+            !est.known || est.manual
+              ? `<div class="tof"><div class="small">${est.manual ? "You entered when they took off. Change it:" : "Do you know when they took off? Enter it and the landing time is worked out from that."}</div>
+            <div class="tof-row"><input class="tof-time" type="time" value="${w.trip && w.trip.manualClock ? esc(w.trip.manualClock) : ""}"><select class="tof-tz"><option value="local">your phone's time</option><option value="tct" ${w.trip && w.trip.manualTz === "tct" ? "selected" : ""}>Torn time (TCT)</option></select></div>
+            <div class="tof-row"><span class="small">or took off</span><input class="tof-ago" type="number" inputmode="numeric" placeholder="min" min="0"><span class="small">minutes ago</span><button class="btn sm" data-act="tofSet" data-id="${id}">Use this</button>${est.manual ? `<button class="link small" data-act="tofClear" data-id="${id}">clear</button>` : ""}</div></div>`
+              : ""
+          }</div>`
           : ""
       }
       ${sold24 ? `<div class="box">💰 Sold about <b>${short(sold24)}</b> in the last 24h. ${mugLine(sold24, p.ct, co && co.stars)}</div>` : ""}
@@ -1432,6 +1485,17 @@
       ${watched ? bazaarBox(w) : ""}
       ${watched ? `<h3>Log</h3><div class="log">${(w.log || []).length ? w.log.map((l) => `<div><span class="muted">${clock(l.t)} ${new Date(l.t).toLocaleDateString([], { day: "numeric", month: "short" })}</span> ${ICON[l.kind] || ""} ${esc(l.text)}</div>`).join("") : `<p class="muted small">Nothing yet. Changes show here and in 🔔 Feed.</p>`}</div>` : ""}
       ${watched ? `<label class="tog"><input type="checkbox" data-act="bzToggle" data-id="${id}" ${w.bazaar !== false ? "checked" : ""}> Check their bazaar (1 API call every ${S.bazaarMin} min)</label>` : ""}`;
+  }
+  function planeNote(w) {
+    const t = w.trip || {};
+    const bits = [];
+    if (t.plane) {
+      const pt = planeTicket(t.plane);
+      bits.push(`Plane type from Torn: "${esc(t.plane)}"${pt ? ` → ${TICKETS[pt.k]} (${pt.how === "learned" ? "learned from real flights" : "a guess until a flight confirms it"})` : " (not matched to a ticket yet)"}.`);
+    } else if (t.plane === null) bits.push("Torn didn't give a plane type for this flight.");
+    if (w.ticket != null) bits.push(`Learned from a past flight: flies ${TICKETS[w.ticket]}.`);
+    else bits.push("After one full flight I'll learn their usual ticket.");
+    return bits.join(" ");
   }
   function bazaarBox(w) {
     if (w.bazaar === false) return "";
@@ -2504,6 +2568,39 @@
         saveLearn();
         render();
         break;
+      case "tofSet": {
+        const w = W[id];
+        if (!w || !w.trip) break;
+        const ago = $(".tof-ago").value.trim();
+        const tm = $(".tof-time").value;
+        const tz = $(".tof-tz").value;
+        let dep = 0;
+        if (ago !== "") dep = now() - Math.max(0, +ago) * MIN;
+        else if (tm) {
+          const [hh, mm] = tm.split(":").map(Number);
+          const d = new Date();
+          if (tz === "tct") d.setUTCHours(hh, mm, 0, 0);
+          else d.setHours(hh, mm, 0, 0);
+          dep = d.getTime();
+          if (dep > now() + MIN) dep -= DAY; // a time later than now means yesterday
+        }
+        if (!dep) return toast("Enter a time or minutes ago", "bad");
+        if (dep > now()) dep = now();
+        Object.assign(w.trip, { depLo: dep - MIN, depHi: dep + MIN, manual: true, manualClock: tm || "", manualTz: tz });
+        saveSoon("watch");
+        toast("Take-off time set", "ok");
+        render();
+        break;
+      }
+      case "tofClear": {
+        const w = W[id];
+        if (w && w.trip) {
+          Object.assign(w.trip, { depLo: 0, manual: false, manualClock: "" });
+          saveSoon("watch");
+        }
+        render();
+        break;
+      }
       case "testAlert":
         showAlert({ t: now(), pid: myId || 1, name: "Test", kind: "land", text: "landed in Japan · flies Airstrip" });
         break;
@@ -2760,6 +2857,10 @@ input:focus, select:focus { border-color: var(--acc); }
 .row-btn { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 12px 0 6px; }
 .row-btn .btn.ghost { margin: 0; }
 .log { display: grid; gap: 4px; font-size: 13px; }
+.tof { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--line); display: grid; gap: 6px; }
+.tof-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.tof-row input, .tof-row select { width: auto; flex: 1; min-width: 90px; padding: 6px 8px; font-size: 15px; }
+.tof-row .tof-ago { flex: 0 0 80px; min-width: 70px; }
 .mini-list { display: grid; gap: 3px; font-size: 13px; }
 .mini-list div { display: flex; justify-content: space-between; gap: 8px; border-bottom: 1px solid var(--line); padding: 3px 0; }
 .feedtop { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
