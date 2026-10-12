@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Watch Geek
 // @namespace    https://github.com/SarcasticGeekJr/torn-watch-geek
-// @version      1.4.1
+// @version      1.4.2
 // @description  Watch players (online, hospital, jail, flight landing times, bazaar and Item Market listings) and find mug targets: rich sellers, sleeping workers in high-paying companies, and your own advanced search, all with estimated battle stats and win chance. Built for Torn PDA, works in Tampermonkey too.
 // @author       SarcasticGeekJr
 // @match        https://www.torn.com/*
@@ -48,7 +48,7 @@
 
   // ---------------------------------------------------------------- config
   const PDA_KEY = "###PDA-APIKEY###"; // Torn PDA replaces this with your key at runtime
-  const VERSION = "1.4.1"; // keep in sync with @version above
+  const VERSION = "1.4.2"; // keep in sync with @version above
   const UPDATE_URL = "https://raw.githubusercontent.com/SarcasticGeekJr/torn-watch-geek/main/torn-watch-geek.user.js";
   const TORN = "https://api.torn.com";
   const FFS = "https://ffscouter.com/api/v1/get-stats";
@@ -379,18 +379,34 @@
     st = st || {};
     const desc = st.description || "";
     const out = { state: st.state || "", desc, until: +st.until || 0, details: st.details || "" };
+    // Torn writes trips as "Traveling to Japan", "Returning to Torn from Japan" or "Traveling from Japan to Torn".
+    // trip.country is always the foreign country (that's what sets the flight time).
     if (out.state === "Traveling") {
+      const fromTo = desc.match(/from (.+?) to (.+)$/i);
       if (/Returning/i.test(desc)) {
-        const m = desc.match(/from (.+)$/);
-        out.trip = { dir: "back", country: m ? m[1].trim() : "" };
+        const m = desc.match(/from (.+)$/i);
+        out.trip = { dir: "back", country: placeName(m ? m[1] : "") };
+      } else if (fromTo) {
+        const a = placeName(fromTo[1]),
+          b = placeName(fromTo[2]);
+        out.trip = b === "Torn" ? { dir: "back", country: a } : { dir: "out", country: b };
       } else {
         const i = desc.lastIndexOf(" to ");
-        out.trip = { dir: "out", country: i >= 0 ? desc.slice(i + 4).trim() : "" };
+        const c = placeName(i >= 0 ? desc.slice(i + 4) : "");
+        out.trip = c === "Torn" ? { dir: "back", country: "" } : { dir: "out", country: c };
       }
     } else if (out.state === "Abroad") {
-      out.abroad = desc.replace(/^In /, "").trim();
+      out.abroad = placeName(desc.replace(/^In /, ""));
     }
     return out;
+  }
+  const PLACE_ALIAS = { "united arab emirates": "UAE", uae: "UAE", uk: "United Kingdom", "great britain": "United Kingdom", cayman: "Cayman Islands", "torn city": "Torn", torn: "Torn" };
+  function placeName(x) {
+    const v = String(x || "").trim().replace(/[.!]$/, "");
+    if (!v) return "";
+    const a = PLACE_ALIAS[v.toLowerCase()];
+    if (a) return a;
+    return Object.keys(FLIGHT).find((k) => k.toLowerCase() === v.toLowerCase()) || v;
   }
   const tripKey = (t) => (t ? t.dir + ":" + t.country : "");
   const flightMs = (country, ticket) => (FLIGHT[country] ? FLIGHT[country][ticket] * MIN : 0);
@@ -442,7 +458,8 @@
   function travelLine(w, where) {
     const s = w.s || {};
     if (!s.trip) return "";
-    const dest = s.trip.dir === "back" ? "Torn" : s.trip.country || "?";
+    // Route, e.g. "Switzerland → Torn" or "Torn → Japan".
+    const dest = s.trip.dir === "back" ? `${s.trip.country || "abroad"} → Torn` : `Torn → ${s.trip.country || "?"}`;
     const e = tripEstimate(w);
     if (!e) return `✈️ ${esc(dest)}`;
     if (e.unknown) return `✈️ ${esc(dest)} · should land any minute`;
@@ -493,10 +510,15 @@
         else if (b === "Offline") event(id, "offline", "went offline");
       }
       // Trips
+      // Older versions read "Traveling from X to Torn" as a trip to a country called "Torn": fix it in place.
+      if (prev.trip && prev.trip.country === "Torn" && cur.trip && cur.trip.dir === "back") {
+        prev.trip = cur.trip;
+        if (w.trip) Object.assign(w.trip, { dir: "back", country: cur.trip.country });
+      }
       if (cur.trip && tripKey(prev.trip) !== tripKey(cur.trip)) {
         w.trip = { dir: cur.trip.dir, country: cur.trip.country, depLo: fresh && !prev.trip ? prevSeen : 0, depHi: t, plane: planeOf(p) };
         const e = tripEstimate(w);
-        event(id, "travel", (cur.trip.dir === "back" ? `flying back to Torn from ${cur.trip.country}` : `flying to ${cur.trip.country}`) + (e && !e.unknown && e.known ? ` · lands ${clock(e.lo)}–${clock(e.hi)}` : " (already in the air when tracking started)"));
+        event(id, "travel", (cur.trip.dir === "back" ? `flying back to Torn${cur.trip.country ? " from " + cur.trip.country : ""}` : `flying to ${cur.trip.country}`) + (e && !e.unknown && e.known ? ` · lands ${clock(e.lo)}–${clock(e.hi)}` : " (already in the air when tracking started)"));
       }
       if (prev.trip && !cur.trip) {
         const trip = w.trip;
