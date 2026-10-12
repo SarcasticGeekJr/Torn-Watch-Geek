@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Watch Geek
 // @namespace    https://github.com/SarcasticGeekJr/torn-watch-geek
-// @version      1.5.2
+// @version      1.5.3
 // @description  Watch players (online, hospital, jail, flight landing times, bazaar and Item Market listings) and find mug targets: rich sellers, sleeping workers in high-paying companies, and your own advanced search, all with estimated battle stats and win chance. Built for Torn PDA, works in Tampermonkey too.
 // @author       SarcasticGeekJr
 // @match        https://www.torn.com/*
@@ -50,7 +50,7 @@
 
   // ---------------------------------------------------------------- config
   const PDA_KEY = "###PDA-APIKEY###"; // Torn PDA replaces this with your key at runtime
-  const VERSION = "1.5.2"; // keep in sync with @version above
+  const VERSION = "1.5.3"; // keep in sync with @version above
   const UPDATE_URL = "https://raw.githubusercontent.com/SarcasticGeekJr/torn-watch-geek/main/torn-watch-geek.user.js";
   const TORN = "https://api.torn.com";
   const FFS = "https://ffscouter.com/api/v1/get-stats";
@@ -1860,18 +1860,20 @@
     const min = +f.min || 0;
     const max = +f.max || 0; // 0 = no maximum
     let noStats = 0;
+    const why = {};
+    const out = (r) => ((why[r] = (why[r] || 0) + 1), false);
     const all = LIVE.filter((r) => {
       const hot = isHot(r);
-      if (f.onlyAway && !hot) return false;
+      if (f.onlyAway && !hot) return out("not 🔥 away");
       // The amount that matters: the sale, or for 🔥 sellers everything unbanked since they were last seen.
       const amt = hot ? Math.max(r.v, unbanked(r.pid)) : r.v;
-      if (amt < min) return false;
-      if (max && amt > max) return false;
-      if (f.item && !r.item.toLowerCase().includes(f.item.toLowerCase())) return false;
+      if (amt < min) return out("under " + short(min));
+      if (max && amt > max) return out("over " + short(max));
+      if (f.item && !r.item.toLowerCase().includes(f.item.toLowerCase())) return out("other items");
       if (f.win) {
         const k = winOf(r.pid).k;
         if (k === "unk") noStats++;
-        if (WIN_ORDER[k] > WIN_ORDER[f.win]) return false;
+        if (WIN_ORDER[k] > WIN_ORDER[f.win]) return out(k === "unk" ? "no stats yet" : k === "avoid" ? "🔴 Avoid" : k === "risky" ? "🟠 Risky" : "🟡 Likely");
       }
       return true;
     });
@@ -1881,7 +1883,11 @@
     // Say exactly which filters are on, so it's clear what is being used.
     const winLbl = { easy: "🟢 Easy", likely: "🟡 Likely or better", risky: "🟠 Risky or better" }[f.win];
     const on = [max ? `sales of ${short(min)} to ${short(max)}` : `sales of ${short(min)} or more`, f.onlyAway ? "🔥 away only" : "", winLbl ? winLbl + " only" : "", f.item ? `item has "${esc(f.item)}"` : ""].filter(Boolean);
-    const sum = `<p class="small livesum">Showing <b>${all.length}</b> of ${LIVE.length} sales · ${on.join(" · ")}${noStats ? ` · <span class="a">${noStats} hidden because their stats haven't loaded${ffErr ? ` (${esc(ffErr)})` : ""}</span>` : ""}</p>`;
+    const hid = Object.entries(why)
+      .sort((a, b) => b[1] - a[1])
+      .map(([k, n]) => `${esc(k)} ${n}`)
+      .join(" · ");
+    const sum = `<p class="small livesum">Showing <b>${all.length}</b> of ${LIVE.length} sales · ${on.join(" · ")}${hid ? `<br>Hidden: ${hid}` : ""}${noStats && ffErr ? ` <span class="a">(${esc(ffErr)})</span>` : ""}</p>`;
     box.innerHTML =
       sum +
       (rows.length
