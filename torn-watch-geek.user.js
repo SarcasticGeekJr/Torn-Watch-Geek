@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Watch Geek
 // @namespace    https://github.com/SarcasticGeekJr/torn-watch-geek
-// @version      1.0.0
+// @version      1.1.0
 // @description  Watch players (online, hospital, jail, flight landing times, bazaar and Item Market listings) and find mug targets: rich sellers, sleeping workers in high-paying companies, and your own advanced search, all with estimated battle stats and win chance. Built for Torn PDA, works in Tampermonkey too.
 // @author       SarcasticGeekJr
 // @match        https://www.torn.com/*
@@ -48,7 +48,7 @@
 
   // ---------------------------------------------------------------- config
   const PDA_KEY = "###PDA-APIKEY###"; // Torn PDA replaces this with your key at runtime
-  const VERSION = "1.0.0"; // keep in sync with @version above
+  const VERSION = "1.1.0"; // keep in sync with @version above
   const UPDATE_URL = "https://raw.githubusercontent.com/SarcasticGeekJr/torn-watch-geek/main/torn-watch-geek.user.js";
   const TORN = "https://api.torn.com";
   const FFS = "https://ffscouter.com/api/v1/get-stats";
@@ -91,16 +91,17 @@
     mugMerits: 0, // 0..10
     plunder: 0, // % bonus from a Plunder weapon
     wageShare: 30, // % of a company's daily income per employee assumed to be paid as wages
+    useFF: true, // send the key to FF Scouter for stat estimates
     salesScan: true, // watch TornW3B bazaar listings for sales
     salesItems: 20, // how many popular items to scan
     salesScanMin: 10,
-    alerts: { online: true, offline: false, hosp: true, jail: true, travel: true, land: true, bazaar: true, market: true },
+    alerts: { mug: true, online: true, offline: false, hosp: true, jail: true, travel: true, land: true, bazaar: true, market: true },
     alertPopup: true,
     alertVibrate: true,
     fab: null,
     tab: "watch",
-    hunt: "rich",
-    rich: { min: 1000000, hours: 24, okOnly: false },
+    hunt: "live",
+    live: { running: false, min: 1000000, onlyAway: false, win: "", item: "", alertMin: 1000000, poolMax: 30, calls: 25 },
     sleep: { types: [], days: 14, minStars: 0, companies: 30, okOnly: true },
     search: {
       name: "", faction: "", lvlMin: "", lvlMax: "", inMin: "", inMax: "", okOnly: true, nwMin: "", offMin: "", offMax: "",
@@ -134,7 +135,8 @@
     },
   };
   const S = Object.assign({}, DEFAULTS, store.get("settings", {}));
-  for (const k of ["alerts", "rich", "sleep", "search", "grow"]) S[k] = Object.assign({}, DEFAULTS[k], S[k]);
+  if (S.hunt === "rich") S.hunt = "live";
+  for (const k of ["alerts", "live", "sleep", "search", "grow"]) S[k] = Object.assign({}, DEFAULTS[k], S[k]);
   S.grow.sources = Object.assign({}, DEFAULTS.grow.sources, S.grow.sources);
   const save = () => store.set("settings", S);
   const apiKey = () => (S.apiKey || (PDA_KEY.includes("#") ? "" : PDA_KEY)).trim();
@@ -155,6 +157,8 @@
   const SALES = store.get("sales", {}); // player id -> [{ t, v, item, src }]
   const SNAP = store.get("snap", {}); // "w:itemId" / "m:itemId" -> { t, by: { pid: [qty, price] } }
   const MUGGED = store.get("mugged", {}); // player id -> time
+  const POOL = store.get("pool", {}); // live sellers: pid -> { n, src, manual, t, ok, bz, val, la, on, st, abroad, err }
+  let LIVE = store.get("live", []); // live sales: [{ t, pid, item, q, v, away, src, pending }]
   const GROW = store.get("grow", { networth: 0, offences: 0, level: 0, facs: {}, facQueue: [] });
   let EVENTS = store.get("events", []); // [{ t, pid, name, kind, text, seen }]
   let CTYPES = store.get("ctypes", null); // { t, types: { id: name } }
@@ -162,7 +166,7 @@
   const saveSoon = (() => {
     const pending = new Set();
     let timer = 0;
-    const objs = { watch: () => W, db: () => DB, companies: () => CO, stats: () => ST, sales: () => SALES, snap: () => SNAP, mugged: () => MUGGED, grow: () => GROW, events: () => EVENTS };
+    const objs = { watch: () => W, db: () => DB, companies: () => CO, stats: () => ST, sales: () => SALES, snap: () => SNAP, mugged: () => MUGGED, grow: () => GROW, events: () => EVENTS, pool: () => POOL, live: () => LIVE };
     let dbTimer = 0;
     return (k) => {
       // The players list can be big, so it is written at most every 15 seconds.
@@ -247,8 +251,10 @@
   // Torn API calls go through one queue that never goes over S.apiPerMin per minute.
   // User actions jump the queue (hi), background polling waits.
   const apiQ = { hi: [], lo: [], sent: [], running: false };
-  let apiUsedTotal = 0;
+  let apiUsedTotal = 0,
+    lastHiAt = 0;
   function apiSlot(hi) {
+    if (hi) lastHiAt = now();
     return new Promise((res) => {
       (hi ? apiQ.hi : apiQ.lo).push(res);
       pumpApi();
@@ -279,9 +285,14 @@
   const apiQueued = () => apiQ.hi.length + apiQ.lo.length;
 
   // Official Torn API. path like "/v2/torn/hof?cat=level" or "/user/123?selections=profile".
+  // Torn asks tools to stop using a key that is wrong, paused or disabled (or risk an IP ban).
+  const DEAD_KEY = { 1: 1, 2: 1, 10: 1, 13: 1, 18: 1 };
+  let deadKey = "", // the key that failed, until the user changes it
+    deadKeyMsg = "";
   async function torn(path, ttl, opts = {}) {
     const key = apiKey();
     if (!key) throw new Error("no API key (add one in ⚙ Settings)");
+    if (deadKey && deadKey === key) throw new Error("API key stopped working: " + deadKeyMsg + ". Check it in ⚙ Settings.");
     const sep = path.includes("?") ? "&" : "?";
     const url = `${TORN}${path}${sep}key=${encodeURIComponent(key)}&comment=TornWatchGeek`;
     const getter = async (u) => {
@@ -293,6 +304,12 @@
       memo.delete(url);
       const msg = d.error.error || "Torn API error " + d.error.code;
       if (d.error.code === 5) apiQ.sent.push(...Array(20).fill(now())); // too many requests: back off
+      if (DEAD_KEY[d.error.code]) {
+        deadKey = key;
+        deadKeyMsg = msg;
+        apiQ.hi.splice(0).forEach((r) => r());
+        apiQ.lo.splice(0).forEach((r) => r());
+      }
       throw new Error(msg);
     }
     return d;
@@ -488,7 +505,7 @@
     updateBadge();
     if (isOpen() && (view.name === "watch" || view.name === "feed" || (view.name === "player" && view.id === +pid))) renderSoon();
   }
-  const ICON = { online: "🟢", offline: "⚪", hosp: "🏥", jail: "🔒", travel: "✈", land: "🛬", bazaar: "🛒", market: "🏷", sold: "💰" };
+  const ICON = { online: "🟢", offline: "⚪", hosp: "🏥", jail: "🔒", travel: "✈", land: "🛬", bazaar: "🛒", market: "🏷", sold: "💰", mug: "🔥" };
 
   let alertQueue = [];
   function showAlert(ev) {
@@ -599,7 +616,7 @@
   // ---------------------------------------------------------------- battle stats (FF Scouter + Torn Stats)
   const ffWait = new Map(); // id -> [resolvers]
   const ffTried = {}; // id -> time of the last lookup that returned nothing
-  const needStats = (id) => apiKey() && !(ST[id] && now() - ST[id].t < STATS_TTL) && !(ffTried[id] && now() - ffTried[id] < 5 * MIN);
+  const needStats = (id) => apiKey() && S.useFF && !(ST[id] && now() - ST[id].t < STATS_TTL) && !(ffTried[id] && now() - ffTried[id] < 5 * MIN);
   let ffTimer = 0,
     ffErr = "",
     ffSent = [];
@@ -705,7 +722,7 @@
   // ---------------------------------------------------------------- watching (background)
   let pollBusy = false;
   async function pollWatch() {
-    if (pollBusy || document.hidden || !apiKey()) return;
+    if (pollBusy || document.hidden || !apiKey() || deadKey === apiKey()) return;
     pollBusy = true;
     try {
       const t = now();
@@ -732,17 +749,7 @@
 
   async function checkBazaar(id) {
     const d = await torn(`/user/${id}?selections=bazaar`, 60 * SEC, {});
-    let raw = d.bazaar || [];
-    if (!Array.isArray(raw)) raw = Object.values(raw);
-    const items = {};
-    for (const it of raw) {
-      const iid = +(it.ID || it.id || it.item_id || 0);
-      if (!iid) continue;
-      const q = +(it.quantity != null ? it.quantity : it.amount) || 0;
-      const p = +(it.price != null ? it.price : it.cost) || 0;
-      const key = iid + ":" + p;
-      items[key] = { id: iid, name: it.name || "Item " + iid, q: (items[key] ? items[key].q : 0) + q, p };
-    }
+    const items = parseBazaar(d.bazaar);
     const w = W[id];
     if (!w) return;
     const old = w.bz && w.bz.items;
@@ -767,6 +774,12 @@
       if (soldV > 0) {
         event(id, "bazaar", `sold or removed ${soldTxt.slice(0, 3).join(", ")}${soldTxt.length > 3 ? " …" : ""} (~${short(soldV)})`);
         addSale(id, soldV, soldTxt.join(", "), "bazaar");
+        if (!POOL[id]) {
+          const s = w.s || {};
+          const m = { la: s.la && s.la.ts, on: s.la && s.la.status, st: s.state, abroad: s.abroad };
+          const away = awayNow(m) || (m.on !== "Online" && m.la && w.bz && m.la * 1000 < w.bz.t ? "offline" : "");
+          for (const x of bazaarDrops(old, items)) pushLive({ t: now(), pid: +id, item: x.item, q: x.q, v: x.v, away, src: "watch" });
+        }
       }
     }
     w.bz = { t: now(), items };
@@ -784,6 +797,193 @@
   function salesIn(pid, hours) {
     const cut = now() - hours * HOUR;
     return (SALES[pid] || []).filter((s) => s.t >= cut).reduce((a, s) => a + s.v, 0);
+  }
+
+  // ---------------------------------------------------------------- Live sales engine
+  // A pool of big sellers is checked one after another (profile + bazaar in one call).
+  // Stock that goes down is a sale. A sale counts as 🔥 "away" when the seller hasn't been active
+  // since before it, or is flying, or is abroad anywhere except the Cayman Islands (which has a bank).
+  function parseBazaar(raw) {
+    if (!raw) raw = [];
+    if (!Array.isArray(raw)) raw = Object.values(raw);
+    const items = {};
+    for (const it of raw) {
+      const iid = +(it.ID || it.id || it.item_id || 0);
+      if (!iid) continue;
+      const q = +(it.quantity != null ? it.quantity : it.amount) || 0;
+      const p = +(it.price != null ? it.price : it.cost) || 0;
+      const key = iid + ":" + p;
+      items[key] = { id: iid, name: it.name || "Item " + iid, q: (items[key] ? items[key].q : 0) + q, p };
+    }
+    return items;
+  }
+  function bazaarDrops(old, items) {
+    const out = [];
+    for (const [k, o] of Object.entries(old || {})) {
+      const it = items[k];
+      const gone = o.q - (it ? it.q : 0);
+      if (gone > 0) out.push({ item: o.name, q: gone, v: gone * o.p });
+    }
+    return out;
+  }
+  function awayNow(m) {
+    if (!m) return "";
+    if (m.st === "Traveling") return "flying ✈";
+    if (m.st === "Abroad" && !/cayman/i.test(m.abroad || "")) return "in " + (m.abroad || "another country");
+    return "";
+  }
+  // Came back after the sale and is somewhere with a bank.
+  const isBanked = (r, m) => !!(m && m.la && m.la * 1000 > r.t && !awayNow(m));
+  // Pool sellers have their own status; watched players use the Watch tab's status.
+  function sellerOf(pid) {
+    if (POOL[pid]) return POOL[pid];
+    const w = W[pid];
+    if (!w || !w.s) return null;
+    return { n: w.name, la: w.s.la && w.s.la.ts, on: w.s.la && w.s.la.status, st: w.s.state, abroad: w.s.abroad };
+  }
+  const isHot = (r) => !r.pending && !!r.away && !isBanked(r, sellerOf(r.pid));
+  function unbanked(pid) {
+    return LIVE.filter((r) => r.pid === +pid && isHot(r)).reduce((a, r) => a + r.v, 0);
+  }
+
+  function addToPool(pid, name, src, manual) {
+    pid = +pid;
+    if (!pid || pid === myId) return;
+    const m = POOL[pid];
+    if (m) {
+      if (manual) m.manual = true;
+      if (name && !m.n) m.n = name;
+      saveSoon("pool");
+      return;
+    }
+    const max = Math.max(1, +S.live.poolMax || 30);
+    const ids = Object.keys(POOL);
+    if (!manual && ids.length >= max) {
+      // Make room by dropping the auto-added seller with the smallest bazaar and no recent sales.
+      const recent = (id) => LIVE.some((r) => r.pid === +id && now() - r.t < 6 * HOUR);
+      const drop = ids.filter((id) => !POOL[id].manual && !recent(id)).sort((a, b) => (POOL[a].val || 0) - (POOL[b].val || 0))[0];
+      if (!drop) return;
+      delete POOL[drop];
+    }
+    POOL[pid] = { n: name || (DB[pid] && DB[pid].n) || "", src, manual: !!manual, t: 0, added: now() };
+    saveSoon("pool");
+  }
+
+  let poolFillAt = store.get("poolFillAt", 0);
+  async function fillPool(force) {
+    if (!force && now() - poolFillAt < 30 * MIN) return;
+    poolFillAt = now();
+    store.set("poolFillAt", poolFillAt);
+    try {
+      const list = await weeklyTopBazaars();
+      list.forEach((b) => {
+        upsert(b.id, { n: b.name, wk: b.weekly, src: "weekly" });
+        addToPool(b.id, b.name, "weekly");
+      });
+    } catch {}
+    // Biggest sellers seen on TornW3B
+    const tot = {};
+    for (const [k, sn] of Object.entries(SNAP)) {
+      if (!k.startsWith("w:")) continue;
+      for (const [pid, [q, p]] of Object.entries(sn.by)) tot[pid] = (tot[pid] || 0) + q * p;
+    }
+    Object.entries(tot)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, Math.max(1, +S.live.poolMax || 30))
+      .forEach(([pid]) => addToPool(pid, (DB[pid] && DB[pid].n) || "", "w3b"));
+  }
+
+  function pushLive(row) {
+    const before = unbanked(row.pid);
+    LIVE.unshift(row);
+    LIVE.sort((a, b) => (b.seen || b.t) - (a.seen || a.t));
+    if (LIVE.length > 400) LIVE.length = 400;
+    saveSoon("live");
+    stats(row.pid).then(drawLiveSoon);
+    maybeMugAlert(row.pid, before);
+    drawLiveSoon();
+  }
+  function maybeMugAlert(pid, before) {
+    const total = unbanked(pid);
+    const at = +S.live.alertMin || 0;
+    if (!total || total < at || before >= at) return;
+    const m = sellerOf(pid);
+    const r = LIVE.find((x) => x.pid === +pid && isHot(x));
+    const w = winOf(pid);
+    event(pid, "mug", `sold ~${short(total)} while away · ${awayText(r, m)}${w.k !== "unk" ? " · " + w.label : ""}`);
+  }
+
+  let liveLast = 0,
+    liveAt = 0;
+  async function checkSeller(pid, hi) {
+    const m = POOL[pid];
+    if (!m) return;
+    m.t = now(); // schedule first, so the same seller isn't picked twice
+    const prevOk = m.ok || 0;
+    let d;
+    try {
+      d = await torn(`/user/${pid}?selections=profile,bazaar`, 5 * SEC, { hi });
+    } catch (e) {
+      m.err = e.message;
+      saveSoon("pool");
+      return;
+    }
+    const st = parseStatus(d.status);
+    const la = d.last_action || {};
+    Object.assign(m, { n: d.name || m.n, la: +la.timestamp || m.la || 0, on: la.status || "", st: st.state, abroad: st.abroad || "", ok: now(), err: "" });
+    upsert(pid, { n: d.name, lv: d.level, la: m.la || null, st: st.state || null, f: d.faction ? +d.faction.faction_id || 0 : null, fn: d.faction ? d.faction.faction_name : null });
+    const items = parseBazaar(d.bazaar);
+    m.val = Object.values(items).reduce((a, i) => a + i.q * i.p, 0);
+    // Torn caches and delays bazaar data on purpose. bazaar_timestamp says how old this copy is,
+    // so a sale happened between the previous copy's time and this one's.
+    const bzT = (+d.bazaar_timestamp || 0) * 1000 || now();
+    const prevBzT = m.bzT || prevOk;
+    if (m.bz && bzT !== m.bzT) {
+      // Not online and no action since before the sale could have happened: they weren't there for it.
+      const away = awayNow(m) || (m.on !== "Online" && m.la && prevBzT && m.la * 1000 < prevBzT ? "offline" : "");
+      for (const s of bazaarDrops(m.bz, items)) {
+        pushLive({ t: bzT, seen: now(), pid: +pid, item: s.item, q: s.q, v: s.v, away, src: "pool" });
+        addSale(pid, s.v, `${s.q}× ${s.item}`, "bazaar");
+      }
+    }
+    if (!m.bz || bzT !== m.bzT) {
+      m.bz = items;
+      m.bzT = bzT;
+    }
+    // Sales spotted elsewhere (TornW3B) waiting for this status check
+    let changed = false;
+    for (const r of LIVE) {
+      if (r.pid !== +pid || !r.pending) continue;
+      r.pending = false;
+      // TornW3B can lag a few minutes, so allow some slack before the spotted time.
+      r.away = awayNow(m) || (m.on !== "Online" && m.la && m.la * 1000 < r.t - 5 * MIN ? "offline" : "");
+      changed = true;
+    }
+    if (changed) {
+      saveSoon("live");
+      maybeMugAlert(pid, 0);
+    }
+    liveLast = now();
+    saveSoon("pool");
+    drawLiveSoon();
+  }
+
+  function liveTick() {
+    if (!S.live.running || document.hidden || !apiKey() || deadKey === apiKey()) return;
+    if (apiQueued() > 0 || now() - lastHiAt < 4 * SEC) return; // watched players and your taps go first
+    const gap = 60000 / Math.max(1, Math.min(100, +S.live.calls || 25));
+    if (now() - liveAt < gap) return;
+    const ids = Object.keys(POOL);
+    if (!ids.length) {
+      fillPool(false);
+      return;
+    }
+    liveAt = now();
+    const next = ids.sort((a, b) => (POOL[a].t || 0) - (POOL[b].t || 0))[0];
+    // Torn caches bazaar data for at least 30s, so checking a seller more often wastes calls.
+    if (now() - (POOL[next].t || 0) < 30 * SEC) return;
+    checkSeller(+next, false);
+    if (Math.random() < 0.02) fillPool(false);
   }
 
   // TornW3B bazaar scan: compare listings between scans; a drop in stock means a sale.
@@ -841,6 +1041,11 @@
         if (gone > 0 && gone <= oq) {
           const v = gone * op;
           addSale(pid, v, `${gone}× ${itemName}`, src);
+          if (src === "bazaar" && S.live.running && !POOL[pid] && v >= Math.min(+S.live.min || 0, +S.live.alertMin || 0)) {
+            addToPool(pid, (DB[pid] && DB[pid].n) || "", "w3b");
+            pushLive({ t: now(), pid: +pid, item: itemName, q: gone, v, away: "", pending: true, src: "w3b" });
+            checkSeller(+pid, true);
+          }
           if (W[pid]) event(pid, src === "market" ? "market" : "bazaar", `sold ${gone}× ${itemName} (~${short(v)})${src === "market" ? " on the Item Market" : ""}`);
         }
       }
@@ -866,7 +1071,8 @@
     imLastSig = "";
   function scanMarketPage() {
     const iid = marketItemId();
-    if (!iid) return;
+    // Torn's rules: only read a page you are actively looking at.
+    if (!iid || document.hidden) return;
     const links = [...document.querySelectorAll('a[href*="profiles.php?XID="]')].filter((a) => !host.contains(a));
     const rows = [];
     for (const a of links) {
@@ -1067,6 +1273,7 @@
   }
 
   function noKeyBox() {
+    if (deadKey && deadKey === apiKey()) return `<div class="warnbox r">Your API key stopped working (${esc(deadKeyMsg)}). The script has stopped using it. Fix it in <button class="link" data-act="settings">⚙ Settings</button>.</div>`;
     return apiKey() ? "" : `<div class="warnbox">Add your Torn API key in <button class="link" data-act="settings">⚙ Settings</button> (a <b>Public</b> key is enough). In Torn PDA it's filled in for you.</div>`;
   }
 
@@ -1220,14 +1427,14 @@
     body().innerHTML = `
       ${noKeyBox()}
       <div class="sorts slim">
-        <button class="seg ${mode === "rich" ? "on" : ""}" data-act="hunt" data-mode="rich">💰 Rich sellers</button>
+        <button class="seg ${mode === "live" ? "on" : ""}" data-act="hunt" data-mode="live">📡 Live sales</button>
         <button class="seg ${mode === "sleep" ? "on" : ""}" data-act="hunt" data-mode="sleep">😴 Sleeping workers</button>
         <button class="seg ${mode === "search" ? "on" : ""}" data-act="hunt" data-mode="search">🔎 Search</button>
       </div>
       <div class="hunt-form"></div>
       <div class="hunt-msg small muted"></div>
       <div class="cards results"></div>`;
-    ({ rich: richForm, sleep: sleepForm, search: searchForm })[mode]();
+    ({ live: liveForm, sleep: sleepForm, search: searchForm })[mode]();
     drawResults();
   }
   function setMsg(t) {
@@ -1333,59 +1540,114 @@
     }
   }
 
-  // --- 💰 Rich sellers
-  function richForm() {
-    const f = S.rich;
+  // --- 📡 Live sales
+  function liveForm() {
+    const f = S.live;
+    const n = Object.keys(POOL).length;
+    const every = n ? Math.max(30, (n * 60) / Math.max(1, +f.calls || 25)) : 0;
+    const chips = [500000, 1000000, 5000000, 10000000];
     $(".hunt-form").innerHTML = `
-      <div class="filters two">
-        <label>Sold at least ($)<input data-f="min" type="number" inputmode="numeric" value="${esc(f.min)}"></label>
-        <label>In the last (hours)<input data-f="hours" type="number" inputmode="numeric" value="${esc(f.hours)}"></label>
+      <div class="livebar">
+        <button class="btn ${f.running ? "ghost" : ""}" data-act="liveToggle">${f.running ? "⏸ Pause" : "▶ Start live"}</button>
+        <span class="small livestat"></span>
       </div>
-      <label class="tog"><input type="checkbox" data-f="okOnly" ${f.okOnly ? "checked" : ""}> Only show players who are Okay (not hospital, jail or flying)</label>
-      <div class="row-btn"><button class="btn" data-act="richGo">Show list</button><button class="btn ghost" data-act="scanNow">Scan bazaars now</button></div>
-      <p class="muted small">Sales are spotted by comparing bazaar stock (TornW3B, ${S.salesItems} popular items, every ${S.salesScanMin} min) and Item Market pages you open. ${esc(w3bStatus)}</p>
-      <details class="more"><summary>This week's top-earning bazaars (Torn)</summary><div class="weekly small muted">Tap to load (1 API call).</div></details>`;
-    bindForm(f);
-    $(".more").addEventListener("toggle", loadWeekly, { once: true });
+      <div class="chips">${chips.map((v) => `<button class="chip ${+f.min === v ? "on" : ""}" data-act="liveMin" data-v="${v}">${short(v)}+</button>`).join("")}
+        <input class="chip-in" data-lf="min" type="number" inputmode="numeric" placeholder="custom $" value="${chips.includes(+f.min) ? "" : esc(f.min)}"></div>
+      <div class="filters">
+        <label>Win chance<select data-lf="win"><option value="">Any</option><option value="easy" ${f.win === "easy" ? "selected" : ""}>🟢 Easy</option><option value="likely" ${f.win === "likely" ? "selected" : ""}>🟡 Likely+</option><option value="risky" ${f.win === "risky" ? "selected" : ""}>🟠 Risky+</option></select></label>
+        <label>Item has<input data-lf="item" type="text" placeholder="any" value="${esc(f.item)}"></label>
+        <label>Alert me at<input data-lf="alertMin" type="number" inputmode="numeric" value="${esc(f.alertMin)}"></label>
+      </div>
+      <label class="tog"><input type="checkbox" data-lf="onlyAway" ${f.onlyAway ? "checked" : ""}> Only 🔥 away (offline since the sale, flying, or abroad outside Cayman)</label>
+      <p class="muted small">Torn delays bazaar data on purpose (to slow down mug bots), so a sale shows up a little after it happens. The time shown is Torn's.</p>
+      <div class="live-list cards"></div>
+      <details class="more pool"><summary>Seller pool: ${n} players${every ? ` · each checked about every ${dur(every * SEC) === "0m" ? Math.round(every) + "s" : dur(every * SEC)}` : ""}</summary>
+        <p class="muted small">Big sellers are checked one after another (1 API call each: their bazaar and status). The pool fills itself from Torn's weekly top-earning bazaars and big sellers found on TornW3B. Add anyone you like.</p>
+        <div class="addrow"><input class="poolid" inputmode="numeric" placeholder="Player ID to add"><button class="btn" data-act="poolAdd">Add</button></div>
+        <div class="filters two">
+          <label>Pool size<input data-lf="poolMax" type="number" inputmode="numeric" value="${esc(f.poolMax)}"></label>
+          <label>API calls/min for live<input data-lf="calls" type="number" inputmode="numeric" value="${esc(f.calls)}"></label>
+        </div>
+        <div class="row-btn"><button class="btn ghost" data-act="poolFill">Refill pool now</button><button class="btn ghost" data-act="scanNow">Scan TornW3B now</button><button class="btn ghost" data-act="liveClear">Clear sales list</button></div>
+        <p class="muted small">TornW3B scan (no API key): ${S.salesScan ? `every ${S.salesScanMin} min` : "off in ⚙"}. ${esc(w3bStatus)}</p>
+        <div class="mini-list">${Object.entries(POOL)
+          .sort((a, b) => (b[1].val || 0) - (a[1].val || 0))
+          .map(([id, m]) => `<div><span>${esc(m.n || "#" + id)}${m.manual ? " ⭐" : ""} <small class="muted">${m.val ? short(m.val) + " listed" : ""}${m.err ? " · " + esc(m.err) : ""}</small></span><button class="link" data-act="poolDel" data-id="${id}">remove</button></div>`)
+          .join("")}</div>
+      </details>`;
+    $$(".hunt-form [data-lf]").forEach((el) =>
+      el.addEventListener("change", () => {
+        const k = el.dataset.lf;
+        f[k] = el.type === "checkbox" ? el.checked : el.value;
+        if (["poolMax", "calls"].includes(k)) f[k] = Math.max(1, Math.min(k === "calls" ? 100 : 200, +el.value || DEFAULTS.live[k]));
+        save();
+        if (k === "min") $$(".chip[data-act=liveMin]").forEach((c) => c.classList.toggle("on", +c.dataset.v === +f.min));
+        drawLive();
+      })
+    );
+    drawLive();
   }
-  async function loadWeekly() {
-    const box = $(".weekly");
-    try {
-      const list = await weeklyTopBazaars();
-      list.forEach((b) => upsert(b.id, { n: b.name, wk: b.weekly, src: "weekly" }));
-      box.className = "weekly";
-      box.innerHTML = list.length
-        ? list.map((b) => `<button class="row" data-act="player" data-id="${b.id}"><span class="nm">${esc(b.name)}<small>${b.open ? "open" : "closed"}</small></span><span class="rt"><b>${short(b.weekly)}</b><small>this week</small></span></button>`).join("")
-        : "None listed.";
-    } catch (e) {
-      box.textContent = "Couldn't load: " + e.message;
-    }
+
+  const awayText = (row, m) => {
+    const a = awayNow(m);
+    if (a) return a;
+    return row.away === "offline" && m && m.la ? `offline ${ago(m.la * 1000).replace(" ago", "")}` : row.away || "";
+  };
+  function drawLive() {
+    const box = $(".live-list");
+    if (!box) return;
+    const f = S.live;
+    const st = $(".livestat");
+    const n = Object.keys(POOL).length;
+    if (st) st.innerHTML = f.running ? `<span class="g">● Live</span> · ${n} sellers${liveLast ? ` · last check ${clock(liveLast)}` : ""}${apiQueued() ? " · waiting for API limit" : ""}` : `<span class="muted">Paused</span>`;
+    const min = +f.min || 0;
+    const rows = LIVE.filter((r) => {
+      const hot = isHot(r);
+      if (f.onlyAway && !hot) return false;
+      if (r.v < min && !(hot && unbanked(r.pid) >= min)) return false;
+      if (f.item && !r.item.toLowerCase().includes(f.item.toLowerCase())) return false;
+      if (f.win && WIN_ORDER[winOf(r.pid).k] > WIN_ORDER[f.win]) return false;
+      return true;
+    }).slice(0, 100);
+    box.innerHTML = rows.length
+      ? rows.map(liveRow).join("")
+      : `<p class="muted hint">${LIVE.length ? "No sales match these filters yet." : f.running ? "Watching… sales show up here the moment they're spotted." : "Tap ▶ Start live. Sales show up here the moment they're spotted."}</p>`;
   }
-  function richGo() {
-    const min = +S.rich.min || 0,
-      hours = +S.rich.hours || 24;
-    const list = Object.keys(SALES)
-      .map((id) => ({ id: +id, cash: salesIn(id, hours) }))
-      .filter((r) => r.cash >= min && !(MUGGED[r.id] && now() - MUGGED[r.id] < 2 * DAY))
-      .sort((a, b) => b.cash - a.cash)
-      .slice(0, 40);
-    for (const r of list) {
-      const last = (SALES[r.id] || []).slice(-1)[0];
-      r.line = `💰 Sold ~<b>${short(r.cash)}</b> in ${hours}h${last ? ` · last ${ago(last.t)} (${esc(last.item)})` : ""}`;
-    }
-    const recheck = (r) => {
-      const p = DB[r.id] || {};
-      const co = p.co ? CO[p.co] : null;
-      const m = mugRange(r.cash, p.ct, co && co.stars);
-      r.line = r.line.split(" · mug")[0] + (m ? ` · mug ~${short(m[0])}–${short(m[1])}` : "");
-      r.hidden = S.rich.okOnly && p.st && p.st !== "Okay";
+  function liveRow(r) {
+    const m = sellerOf(r.pid);
+    const hot = isHot(r);
+    const banked = isBanked(r, m);
+    const total = hot ? unbanked(r.pid) : 0;
+    const d = DB[r.pid] || {};
+    const mr = hot ? mugRange(total, d.ct, d.co && CO[d.co] ? CO[d.co].stars : 0) : null;
+    let status;
+    if (r.pending) status = `<span class="muted">checking status…</span>`;
+    else if (!r.away) status = `<span class="muted">was around for the sale, probably banked</span>`;
+    else if (banked) status = `<span class="muted">came back ${m && m.la ? ago(m.la * 1000) : ""}, probably banked</span>`;
+    else if (hot) status = `<span class="hot">🔥 ${esc(awayText(r, m))}</span>${total > r.v ? ` · unbanked ~<b>${short(total)}</b>` : ""}${mr ? ` · mug ~${short(mr[0])}–${short(mr[1])}` : ""}`;
+    else status = `<span class="muted">${m && m.on === "Online" ? "online" : m && m.on ? "active " + ago(m.la * 1000) : ""}</span>`;
+    return `<div class="card lrow ${hot ? "hotrow" : ""} ${banked ? "dim" : ""}">
+      <div class="crow">
+        <div class="c1">
+          <div><span class="muted small" title="Time of Torn's bazaar data">${new Date(r.t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</span>
+            <button class="link nmlink" data-act="player" data-id="${r.pid}">${esc((m && m.n) || d.n || "#" + r.pid)}</button></div>
+          <div class="small">sold ${r.q}× ${esc(r.item)} <b>${short(r.v)}</b>${r.src === "w3b" ? ' <span class="muted">(TornW3B)</span>' : ""}</div>
+          <div class="small">${status}</div>
+          <div class="small">${statsChip(r.pid)}</div>
+        </div>
+        <div class="c2">${hot ? `<a class="btn sm" href="${attackUrl(r.pid)}">Attack</a>` : `<a class="ib sm" href="${profileUrl(r.pid)}" title="Profile">👤</a>`}</div>
+      </div>
+    </div>`;
+  }
+  const drawLiveSoon = (() => {
+    let t = 0;
+    return () => {
+      clearTimeout(t);
+      t = setTimeout(() => {
+        if (isOpen() && view.name === "hunt" && S.hunt === "live") drawLive();
+      }, 200);
     };
-    list.forEach(recheck);
-    view.results = { mode: "rich", list };
-    view.msg = list.length ? "" : `No sales over ${short(min)} spotted yet. The scanner needs two scans to see a sale, so check back in a bit.`;
-    drawResults();
-    if (list.length) enrich(list, { profile: true, company: true, recheck, label: "Checking players", done: (l) => `${l.filter((r) => !r.hidden).length} players. Cash is a guess from sales; they may have banked it.` });
-  }
+  })();
 
   // --- 😴 Sleeping workers
   async function sleepForm() {
@@ -1431,11 +1693,16 @@
     try {
       let cos = [];
       for (const t of f.types) {
-        setMsg(`Loading ${esc(typeName(t))} companies…`);
-        const d = await torn(`/company/${t}?selections=companies`, 6 * HOUR, { hi: true });
-        const all = d.company || d.companies || {};
-        for (const [cid, c] of Object.entries(all)) {
-          cos.push({ cid: +(c.ID || cid), type: t, stars: +c.rating || 0, inc: +c.daily_income || 0, emp: +c.employees_hired || 0, n: c.name });
+        // Torn returns 100 companies per call, so page through (up to 5 pages per type).
+        for (let off = 0; off < 500; off += 100) {
+          setMsg(`Loading ${esc(typeName(t))} companies… ${off ? off + "+" : ""}`);
+          const d = await torn(`/company/${t}?selections=companies&limit=100&offset=${off}`, 6 * HOUR, { hi: true });
+          const all = d.company || d.companies || {};
+          const rows = Object.entries(all);
+          for (const [cid, c] of rows) {
+            cos.push({ cid: +(c.ID || cid), type: t, stars: +c.rating || 0, inc: +c.daily_income || 0, emp: +c.employees_hired || 0, n: c.name });
+          }
+          if (rows.length < 100) break;
         }
       }
       cos = cos.filter((c) => c.stars >= (+f.minStars || 0) && c.emp > 0).sort((a, b) => b.inc / b.emp - a.inc / a.emp || b.stars - a.stars);
@@ -1652,6 +1919,17 @@
   }
 
   // ---------------------------------------------------------------- Settings
+  // API Terms of Service table, as Torn asks every tool to show where the key is entered.
+  function tosTable() {
+    const rows = [
+      ["Data storage", "Only locally (on this phone, in the browser's storage)"],
+      ["Data sharing", "Nobody. Player IDs you look up go to FF Scouter for stat estimates (if turned on)"],
+      ["Purpose of use", "Competitive advantage: tracking players and finding mug targets (players holding cash after bazaar / Item Market sales, inactive workers)"],
+      ["Key storage & sharing", "Stored locally / Shared with FF Scouter (stat estimates, can be turned off)"],
+      ["Key access level", "Public. Limited is only used, if you have it, to read your own battle stats"],
+    ];
+    return `<details class="more tos"><summary>API key terms of use (Torn ToS)</summary><table class="tos-t">${rows.map(([a, b]) => `<tr><th>${a}</th><td>${b}</td></tr>`).join("")}</table></details>`;
+  }
   function renderSettings() {
     const key = apiKey();
     const al = (k, label) => `<label class="tog"><input type="checkbox" data-al="${k}" ${S.alerts[k] ? "checked" : ""}> ${label}</label>`;
@@ -1661,11 +1939,15 @@
         <label class="blk">Torn API key <small class="muted">(Public is enough)</small>
           <input class="key" data-k="apiKey" type="password" autocomplete="off" placeholder="${!S.apiKey && key ? "using Torn PDA key" : "16 characters"}" value="${esc(S.apiKey)}">
         </label>
-        <p class="muted small">Stored on this phone. Sent to api.torn.com, and to ffscouter.com for stat estimates (register it once at ffscouter.com).${PDA_KEY.includes("#") ? "" : " In Torn PDA your key is used automatically if this is empty."}</p>
+        <p class="muted small">${PDA_KEY.includes("#") ? "" : "In Torn PDA your key is used automatically if this is empty. "}${deadKey && deadKey === key ? `<span class="r">This key stopped working (${esc(deadKeyMsg)}). Enter a working key.</span>` : ""}</p>
+        ${tosTable()}
+        <label class="tog col"><span><input type="checkbox" data-s="useFF" ${S.useFF ? "checked" : ""}> <b>Use FF Scouter for battle stats and win chance</b></span>
+          <small class="muted">Sends your key and the player IDs you look at to ffscouter.com. Register your key there once. Their terms: <a href="https://ffscouter.com" target="_blank" rel="noopener">ffscouter.com</a></small></label>
         ${ffErr ? `<p class="small r">${esc(ffErr)}</p>` : ""}
         <label class="blk">Torn Stats key <small class="muted">(optional, for spy reports)</small>
           <input class="key" data-k="tsKey" type="password" autocomplete="off" placeholder="leave empty if you don't use Torn Stats" value="${esc(S.tsKey)}">
         </label>
+        <p class="muted small">Only sent to tornstats.com, to read spy reports on a player's page. Their terms: <a href="https://www.tornstats.com" target="_blank" rel="noopener">tornstats.com</a></p>
 
         <h3>API use</h3>
         ${numIn("apiPerMin", "Max Torn API calls per minute", 'min="5" max="100"')}
@@ -1674,6 +1956,7 @@
         ${numIn("bazaarMin", "Check their bazaars every (minutes)", 'min="2"')}
 
         <h3>Alerts</h3>
+        ${al("mug", "🔥 Mug chance (live sales over your alert amount)")}
         ${al("online", "Came online")}
         ${al("offline", "Went offline")}
         ${al("hosp", "Hospital in / out")}
@@ -1693,7 +1976,7 @@
         ${numIn("plunder", "Plunder bonus on my weapon (%)", 'min="0" max="100"')}
         ${numIn("wageShare", "Guess: wages = % of company income per worker", 'min="1" max="100"')}
 
-        <h3>Rich sellers scanner</h3>
+        <h3>TornW3B scanner (finds sellers for Live sales)</h3>
         <label class="tog"><input type="checkbox" data-s="salesScan" ${S.salesScan ? "checked" : ""}> Scan TornW3B bazaars for sales (no API key used)</label>
         ${numIn("salesItems", "Popular items to scan", 'min="5" max="60"')}
         ${numIn("salesScanMin", "Scan every (minutes)", 'min="5"')}
@@ -1720,6 +2003,7 @@
         S[el.dataset.k] = el.value.trim();
         save();
         memo.clear();
+        deadKey = "";
         ffErr = "";
         toast("Saved");
       })
@@ -1820,8 +2104,40 @@
         view.msg = "";
         render();
         break;
-      case "richGo":
-        richGo();
+      case "liveToggle":
+        S.live.running = !S.live.running;
+        save();
+        if (S.live.running && !Object.keys(POOL).length) fillPool(true);
+        liveForm();
+        break;
+      case "liveMin":
+        S.live.min = +el.dataset.v;
+        save();
+        liveForm();
+        break;
+      case "poolAdd": {
+        const pid = +($(".poolid").value || "").replace(/\D/g, "");
+        if (!pid) return toast("Enter a player ID", "bad");
+        addToPool(pid, (DB[pid] && DB[pid].n) || "", "you", true);
+        toast("Added to pool", "ok");
+        liveForm();
+        break;
+      }
+      case "poolDel":
+        delete POOL[id];
+        saveSoon("pool");
+        liveForm();
+        break;
+      case "poolFill":
+        toast("Filling pool…", "busy", 0);
+        await fillPool(true);
+        toast(`Pool has ${Object.keys(POOL).length} sellers`, "ok");
+        liveForm();
+        break;
+      case "liveClear":
+        LIVE = [];
+        saveSoon("live");
+        drawLive();
         break;
       case "scanNow":
         toast("Scanning bazaars…", "busy", 0);
@@ -1996,6 +2312,7 @@
     setInterval(pollWatch, 5 * SEC);
     setTimeout(pollWatch, 1500);
     setInterval(() => scanSales(false), MIN);
+    setInterval(liveTick, 500);
     setTimeout(() => scanSales(false), 20 * SEC);
     // Live countdowns on the Watch tab
     setInterval(() => isOpen() && (view.name === "watch" || view.name === "player") && renderSoon(), 30 * SEC);
@@ -2114,6 +2431,13 @@ input:focus, select:focus { border-color: var(--acc); }
 .seg { flex: 1; background: transparent; border: 0; color: var(--muted); border-radius: 9px; padding: 7px 2px; font-size: 12px; }
 .seg.on { background: var(--bg3); color: var(--text); font-weight: 700; }
 .hunt-msg { margin: 10px 2px 6px; min-height: 1em; }
+.livebar { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+.livebar .btn.ghost { margin: 0; }
+.chip-in { width: 110px; padding: 5px 10px; border-radius: 999px; font-size: 13px; }
+.live-list { margin-top: 10px; }
+.lrow.hotrow { border-color: rgba(255,169,77,.6); }
+.hot { color: var(--orange); font-weight: 700; }
+details.pool .mini-list { margin-top: 8px; }
 .cards { display: flex; flex-direction: column; gap: 6px; }
 .card { background: var(--bg2); border: 1px solid var(--line); border-radius: 12px; padding: 9px 10px; }
 .card.dim { opacity: .55; }
@@ -2137,6 +2461,12 @@ details.more .weekly { display: flex; flex-direction: column; gap: 6px; margin-t
 .tog input.num { width: 80px; margin-left: auto; flex: none; }
 .tog input.num.wide { width: 150px; }
 .about { display: grid; gap: 6px; justify-items: start; }
+.tos-t { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 12px; }
+.tos-t th, .tos-t td { text-align: left; vertical-align: top; padding: 5px 4px; border-bottom: 1px solid var(--line); }
+.tos-t th { color: var(--muted); font-weight: 600; width: 34%; }
+.tog.col { flex-direction: column; align-items: stretch; gap: 3px; }
+.tog.col > span { display: flex; align-items: center; gap: 10px; }
+.tog a, .form a { color: var(--acc); }
 .about .btn.ghost { margin: 0; }
 .spin { width: 28px; height: 28px; margin: 30px auto; border-radius: 50%; border: 3px solid var(--line); border-top-color: var(--acc); animation: sp .8s linear infinite; }
 @keyframes sp { to { transform: rotate(360deg); } }

@@ -38,10 +38,15 @@ Updates: Torn PDA checks when the app starts (or Settings → Userscripts → �
 - Pop-up alerts (and vibration) for the things you pick in ⚙. Everything also goes in **🔔 Feed**.
 
 ### 🎯 Hunt
-**💰 Rich sellers:** players who sold at least $X in the last N hours.
-- Sales are spotted by comparing bazaar stock over time: popular items on TornW3B every 10 minutes, your watched players' bazaars, and Item Market pages you open.
-- Shows a rough mug estimate. Bazaar and Item Market money goes to cash on hand.
-- Also lists Torn's own "top-earning bazaars this week".
+**📡 Live sales:** a list that keeps updating with sales as they're spotted.
+- Tap **▶ Start live**. The script checks a **pool of big sellers** one after another: their bazaar and status in one API call each.
+- The pool fills itself from Torn's weekly top-earning bazaars and big sellers found on TornW3B. You can add anyone.
+- 🔥 means they sold **while away**: offline since the sale, flying, or abroad anywhere except the Cayman Islands (which has a bank). The money is probably still on hand.
+- Each 🔥 row shows the total unbanked since they were last seen, plus a mug estimate. When they come back, the row turns grey ("probably banked").
+- Filters: $500k / $1M / $5M / $10M or your own amount, only 🔥, win chance, item.
+- 🔥 alert (pop-up and vibration) when someone's unbanked total passes your alert amount.
+- Speed: the default is 25 API calls a minute for live, and each seller is checked at most every 30 seconds. Torn **delays bazaar data on purpose** to slow down mug bots, so sales show up a little after they happen. Times shown are Torn's.
+- Watched players' bazaar sales and TornW3B sales also show up here.
 
 **😴 Sleeping workers:** inactive employees of high-paying companies. Their daily wages pile up as cash on hand.
 - Pick company types (Oil Rig and Mining Corporation are selected by default), days inactive (default 14) and minimum stars.
@@ -53,6 +58,15 @@ Updates: Torn PDA checks when the app starts (or Settings → Userscripts → �
 - Filters: name, faction, level, inactive days, days old, offences, networth, gender, property, company type, company stars, max battle stats, win chance, Okay only, hide 7★ clothing store workers (−75% mug), hide players you mugged recently.
 - Quick filters run instantly on the saved list. The top results then get a fresh profile check (1 API call each) for status, gender, property, company and stars.
 
+### API key terms (Torn ToS)
+| Data storage | Data sharing | Purpose of use | Key storage & sharing | Key access level |
+|---|---|---|---|---|
+| Only locally | Nobody (player IDs you look up go to FF Scouter, if turned on) | Competitive advantage: tracking players and finding mug targets | Stored locally / Shared with FF Scouter (can be turned off) | Public (Limited only used to read your own battle stats) |
+
+- FF Scouter terms: [ffscouter.com](https://ffscouter.com). Torn Stats (optional): [tornstats.com](https://www.tornstats.com).
+- If Torn says the key is wrong, paused or disabled, the script stops using it until you change it.
+- It reads only Torn pages you are looking at, and makes no other requests to torn.com.
+
 ### Stats and win chance
 - Estimated battle stats and Fair Fight come from **FF Scouter**.
 - Optional **Torn Stats** key: shows real spy reports on a player's page when your faction has one.
@@ -62,7 +76,7 @@ Updates: Torn PDA checks when the app starts (or Settings → Userscripts → �
 ## API use
 - All Torn API calls go through one queue, capped at **30 a minute** by default (change it in ⚙). Torn allows 100 a minute shared by all your tools.
 - Watched players: 1 call per player per check (default every 60s) plus 1 per bazaar check (every 5 min).
-- Hunt only uses calls when you tap a button.
+- Live sales: 25 calls a minute while it's running (pause it any time). Search and Sleeping workers only use calls when you tap a button.
 - It only runs while Torn is open. It can't alert you when the app is closed.
 
 ## Limits
