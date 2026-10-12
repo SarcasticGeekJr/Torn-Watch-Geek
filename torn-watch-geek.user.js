@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Watch Geek
 // @namespace    https://github.com/SarcasticGeekJr/torn-watch-geek
-// @version      1.1.0
+// @version      1.1.1
 // @description  Watch players (online, hospital, jail, flight landing times, bazaar and Item Market listings) and find mug targets: rich sellers, sleeping workers in high-paying companies, and your own advanced search, all with estimated battle stats and win chance. Built for Torn PDA, works in Tampermonkey too.
 // @author       SarcasticGeekJr
 // @match        https://www.torn.com/*
@@ -48,7 +48,7 @@
 
   // ---------------------------------------------------------------- config
   const PDA_KEY = "###PDA-APIKEY###"; // Torn PDA replaces this with your key at runtime
-  const VERSION = "1.1.0"; // keep in sync with @version above
+  const VERSION = "1.1.1"; // keep in sync with @version above
   const UPDATE_URL = "https://raw.githubusercontent.com/SarcasticGeekJr/torn-watch-geek/main/torn-watch-geek.user.js";
   const TORN = "https://api.torn.com";
   const FFS = "https://ffscouter.com/api/v1/get-stats";
@@ -291,8 +291,8 @@
     deadKeyMsg = "";
   async function torn(path, ttl, opts = {}) {
     const key = apiKey();
-    if (!key) throw new Error("no API key (add one in ⚙ Settings)");
-    if (deadKey && deadKey === key) throw new Error("API key stopped working: " + deadKeyMsg + ". Check it in ⚙ Settings.");
+    if (!key) throw new Error("no API key (add one in ⚙️ Settings)");
+    if (deadKey && deadKey === key) throw new Error("API key stopped working: " + deadKeyMsg + ". Check it in ⚙️ Settings.");
     const sep = path.includes("?") ? "&" : "?";
     const url = `${TORN}${path}${sep}key=${encodeURIComponent(key)}&comment=TornWatchGeek`;
     const getter = async (u) => {
@@ -414,14 +414,14 @@
     if (!s.trip) return "";
     const where = s.trip.dir === "back" ? "Torn" : s.trip.country || "?";
     const e = tripEstimate(w);
-    if (!e) return `✈ ${esc(where)}`;
-    if (e.unknown) return `✈ ${esc(where)} · should land any minute`;
+    if (!e) return `✈️ ${esc(where)}`;
+    if (e.unknown) return `✈️ ${esc(where)} · should land any minute`;
     if (e.learned && e.known) {
       const o = e.opts[0];
-      return `✈ ${esc(where)} · lands ~${clock(o.mid)} <small class="muted">(in ${dur(o.mid - now())}, ${TICKETS[o.k]})</small>`;
+      return `✈️ ${esc(where)} · lands ~${clock(o.mid)} <small class="muted">(in ${dur(o.mid - now())}, ${TICKETS[o.k]})</small>`;
     }
-    if (!e.known) return `✈ ${esc(where)} · lands by ${clock(e.hi)} <small class="muted">(seen already flying)</small>`;
-    return `✈ ${esc(where)} · lands ${clock(Math.max(e.lo, now()))}–${clock(e.hi)}`;
+    if (!e.known) return `✈️ ${esc(where)} · lands by ${clock(e.hi)} <small class="muted">(seen already flying)</small>`;
+    return `✈️ ${esc(where)} · lands ${clock(Math.max(e.lo, now()))}–${clock(e.hi)}`;
   }
 
   // Called with each fresh profile of a watched player. Works out trips, landings and alerts.
@@ -505,7 +505,7 @@
     updateBadge();
     if (isOpen() && (view.name === "watch" || view.name === "feed" || (view.name === "player" && view.id === +pid))) renderSoon();
   }
-  const ICON = { online: "🟢", offline: "⚪", hosp: "🏥", jail: "🔒", travel: "✈", land: "🛬", bazaar: "🛒", market: "🏷", sold: "💰", mug: "🔥" };
+  const ICON = { online: "🟢", offline: "⚪", hosp: "🏥", jail: "🔒", travel: "✈️", land: "🛬", bazaar: "🛒", market: "🏷", sold: "💰", mug: "🔥" };
 
   let alertQueue = [];
   function showAlert(ev) {
@@ -522,7 +522,7 @@
       return;
     }
     box.hidden = false;
-    box.innerHTML = `<div class="al-txt"><b>${ICON[ev.kind] || "👁"} ${esc(ev.name)}</b> ${esc(ev.text)}
+    box.innerHTML = `<div class="al-txt"><b>${ICON[ev.kind] || "👁️"} ${esc(ev.name)}</b> ${esc(ev.text)}
       <small>${clock(ev.t)}${alertQueue.length > 1 ? ` · ${alertQueue.length - 1} more` : ""}</small></div>
       <div class="al-btns"><button class="btn sm" data-act="alertOpen" data-id="${ev.pid}">View</button><button class="ib sm" data-act="alertNext">✕</button></div>`;
   }
@@ -828,7 +828,7 @@
   }
   function awayNow(m) {
     if (!m) return "";
-    if (m.st === "Traveling") return "flying ✈";
+    if (m.st === "Traveling") return "flying ✈️";
     if (m.st === "Abroad" && !/cayman/i.test(m.abroad || "")) return "in " + (m.abroad || "another country");
     return "";
   }
@@ -1189,17 +1189,17 @@
   host.id = "torn-watch-geek";
   const root = host.attachShadow({ mode: "open" });
   root.innerHTML = `<style>${CSS()}</style>
-    <button class="fab" data-act="toggle" title="Torn Watch Geek (drag to move)"><span class="fab-ico">👁</span><span class="fab-badge" hidden></span></button>
+    <button class="fab" data-act="toggle" title="Torn Watch Geek (drag to move)"><span class="fab-ico"><svg class="eye" viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><path d="M12 5C6.5 5 2.3 9.1 1 12c1.3 2.9 5.5 7 11 7s9.7-4.1 11-7c-1.3-2.9-5.5-7-11-7z" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="3.6" fill="currentColor"/></svg></span><span class="fab-badge" hidden></span></button>
     <div class="scrim" data-act="close" hidden></div>
     <section class="panel" hidden role="dialog" aria-label="Torn Watch Geek">
       <header class="top">
         <button class="ib" data-act="back" title="Back" hidden>‹</button>
         <div class="title">Torn Watch Geek</div>
-        <button class="ib" data-act="settings" title="Settings">⚙</button>
+        <button class="ib" data-act="settings" title="Settings">⚙️</button>
         <button class="ib" data-act="close" title="Close">✕</button>
       </header>
       <nav class="tabs">
-        <button class="tab" data-act="tab" data-tab="watch">👁 Watch</button>
+        <button class="tab" data-act="tab" data-tab="watch">👁️ Watch</button>
         <button class="tab" data-act="tab" data-tab="hunt">🎯 Hunt</button>
         <button class="tab" data-act="tab" data-tab="feed">🔔 Feed</button>
       </nav>
@@ -1273,8 +1273,8 @@
   }
 
   function noKeyBox() {
-    if (deadKey && deadKey === apiKey()) return `<div class="warnbox r">Your API key stopped working (${esc(deadKeyMsg)}). The script has stopped using it. Fix it in <button class="link" data-act="settings">⚙ Settings</button>.</div>`;
-    return apiKey() ? "" : `<div class="warnbox">Add your Torn API key in <button class="link" data-act="settings">⚙ Settings</button> (a <b>Public</b> key is enough). In Torn PDA it's filled in for you.</div>`;
+    if (deadKey && deadKey === apiKey()) return `<div class="warnbox r">Your API key stopped working (${esc(deadKeyMsg)}). The script has stopped using it. Fix it in <button class="link" data-act="settings">⚙️ Settings</button>.</div>`;
+    return apiKey() ? "" : `<div class="warnbox">Add your Torn API key in <button class="link" data-act="settings">⚙️ Settings</button> (a <b>Public</b> key is enough). In Torn PDA it's filled in for you.</div>`;
   }
 
   // ---------------------------------------------------------------- Watch tab
@@ -1368,7 +1368,7 @@
       </div>
       <div class="stats">
         <div class="stat"><span>Status</span><b class="${b.cls}">${esc(w && w.trip ? "Flying" : b.text)}</b><small>${b.la ? "Last action " + b.la : ""}</small></div>
-        <div class="stat"><span>Win chance</span><b>${win.label}</b><small>${win.note || (win.r != null ? "their stats ≈ " + Math.round(win.r * 100) + "% of yours" : S.myTotal ? "" : "add your total stats in ⚙ for a better guess")}</small></div>
+        <div class="stat"><span>Win chance</span><b>${win.label}</b><small>${win.note || (win.r != null ? "their stats ≈ " + Math.round(win.r * 100) + "% of yours" : S.myTotal ? "" : "add your total stats in ⚙️ for a better guess")}</small></div>
         <div class="stat"><span>Est. battle stats</span><b>${st.spy ? num(st.spy.total) : st.bs ? st.bsh || num(st.bs) : "?"}</b><small>${st.spy ? `spy ${st.spy.at ? ago(st.spy.at * 1000) : ""}` : st.ff != null ? "FF " + st.ff.toFixed(2) + " (FF Scouter)" : ffErr ? esc(ffErr) : ""}</small></div>
         <div class="stat"><span>Job</span><b class="small">${p.cn ? esc(p.cn) : p.pos ? esc(p.pos) : "?"}</b><small>${p.ct ? esc(typeName(p.ct)) : ""}${co ? " · " + co.stars + "★" : ""}${p.pos && p.cn ? " · " + esc(p.pos) : ""}</small></div>
       </div>
@@ -1415,7 +1415,7 @@
       <div class="list">${
         EVENTS.length
           ? EVENTS.slice(0, 150)
-              .map((e) => `<button class="row ev" data-act="player" data-id="${e.pid}"><span class="evi">${ICON[e.kind] || "👁"}</span><span class="nm"><b>${esc(e.name)}</b> <span class="evt">${esc(e.text)}</span><small>${clock(e.t)} · ${ago(e.t)}</small></span></button>`)
+              .map((e) => `<button class="row ev" data-act="player" data-id="${e.pid}"><span class="evi">${ICON[e.kind] || "👁️"}</span><span class="nm"><b>${esc(e.name)}</b> <span class="evt">${esc(e.text)}</span><small>${clock(e.t)} · ${ago(e.t)}</small></span></button>`)
               .join("")
           : `<p class="muted hint">No events yet. Watch some players and changes will show up here.</p>`
       }</div>`;
@@ -1548,7 +1548,7 @@
     const chips = [500000, 1000000, 5000000, 10000000];
     $(".hunt-form").innerHTML = `
       <div class="livebar">
-        <button class="btn ${f.running ? "ghost" : ""}" data-act="liveToggle">${f.running ? "⏸ Pause" : "▶ Start live"}</button>
+        <button class="btn ${f.running ? "ghost" : ""}" data-act="liveToggle">${f.running ? "⏸️ Pause" : "▶️ Start live"}</button>
         <span class="small livestat"></span>
       </div>
       <div class="chips">${chips.map((v) => `<button class="chip ${+f.min === v ? "on" : ""}" data-act="liveMin" data-v="${v}">${short(v)}+</button>`).join("")}
@@ -1569,7 +1569,7 @@
           <label>API calls/min for live<input data-lf="calls" type="number" inputmode="numeric" value="${esc(f.calls)}"></label>
         </div>
         <div class="row-btn"><button class="btn ghost" data-act="poolFill">Refill pool now</button><button class="btn ghost" data-act="scanNow">Scan TornW3B now</button><button class="btn ghost" data-act="liveClear">Clear sales list</button></div>
-        <p class="muted small">TornW3B scan (no API key): ${S.salesScan ? `every ${S.salesScanMin} min` : "off in ⚙"}. ${esc(w3bStatus)}</p>
+        <p class="muted small">TornW3B scan (no API key): ${S.salesScan ? `every ${S.salesScanMin} min` : "off in ⚙️"}. ${esc(w3bStatus)}</p>
         <div class="mini-list">${Object.entries(POOL)
           .sort((a, b) => (b[1].val || 0) - (a[1].val || 0))
           .map(([id, m]) => `<div><span>${esc(m.n || "#" + id)}${m.manual ? " ⭐" : ""} <small class="muted">${m.val ? short(m.val) + " listed" : ""}${m.err ? " · " + esc(m.err) : ""}</small></span><button class="link" data-act="poolDel" data-id="${id}">remove</button></div>`)
@@ -1611,7 +1611,7 @@
     }).slice(0, 100);
     box.innerHTML = rows.length
       ? rows.map(liveRow).join("")
-      : `<p class="muted hint">${LIVE.length ? "No sales match these filters yet." : f.running ? "Watching… sales show up here the moment they're spotted." : "Tap ▶ Start live. Sales show up here the moment they're spotted."}</p>`;
+      : `<p class="muted hint">${LIVE.length ? "No sales match these filters yet." : f.running ? "Watching… sales show up here the moment they're spotted." : "Tap ▶️ Start live. Sales show up here the moment they're spotted."}</p>`;
   }
   function liveRow(r) {
     const m = sellerOf(r.pid);
@@ -1682,7 +1682,7 @@
       </div>
       <label class="tog"><input type="checkbox" data-f="okOnly" ${f.okOnly ? "checked" : ""}> Only show players who are Okay</label>
       <div class="row-btn"><button class="btn" data-act="sleepGo">Find sleeping workers</button></div>
-      <p class="muted small">Uses 1 API call per company type, then 1 per company (saved for 6 hours). Wage pay is a guess: ${S.wageShare}% of the company's daily income per employee (change in ⚙).</p>`;
+      <p class="muted small">Uses 1 API call per company type, then 1 per company (saved for 6 hours). Wage pay is a guess: ${S.wageShare}% of the company's daily income per employee (change in ⚙️).</p>`;
     bindForm(f);
   }
   async function sleepGo() {
@@ -1987,7 +1987,7 @@
         <p class="muted small">${Object.keys(DB).length.toLocaleString()} players saved. <button class="link" data-act="clearDb">Clear list</button></p>
 
         <h3>Other</h3>
-        <button class="btn ghost" data-act="resetFab">Reset 👁 button position</button>
+        <button class="btn ghost" data-act="resetFab">Reset 👁️ button position</button>
         <button class="btn ghost" data-act="clearMugged">Clear “mugged” marks</button>
 
         <h3>About</h3>
@@ -2354,6 +2354,7 @@ button { font: inherit; cursor: pointer; }
   display: flex; align-items: center; justify-content: center; font-size: 24px; -webkit-tap-highlight-color: transparent;
   touch-action: none; user-select: none; -webkit-user-select: none; }
 .fab:active { transform: scale(.95); }
+.fab-ico { display: flex; color: var(--acc); }
 .fab-badge { position: absolute; top: -6px; right: -6px; min-width: 22px; padding: 2px 6px; border-radius: 11px;
   font-size: 11px; font-weight: 700; background: var(--acc); color: #0b1a26; white-space: nowrap; text-align: center; }
 .fab-badge.warn { background: var(--amber); color: #2b2200; }
