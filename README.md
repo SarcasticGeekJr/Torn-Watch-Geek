@@ -78,6 +78,31 @@ Updates: Torn PDA checks when the app starts (or Settings → Userscripts → �
 - Win chance: 🟢 Easy · 🟡 Likely · 🟠 Risky · 🔴 Avoid. Add your total battle stats in ⚙ for a better guess.
 - Tap **💰** on a target after a mug. They're hidden from Hunt for a few days.
 
+## Background tracker
+
+A small free script in **your own Google account** that checks your watched players **every minute, 24/7**, even when Torn is closed or your phone is off.
+
+- Logs every change with the exact time in a Google Sheet: took off, landed, hospital, jail, online, bazaar sales.
+- Optional phone alerts through the free **ntfy** app.
+- Torn Watch Geek reads the log when you open Torn, so take-off and landing times are exact and nothing is missed.
+- Up to 12 watched players (Google's free limits). Uses 1 Torn API call per player per minute.
+- Your API key is stored only in your Google account and only sent to api.torn.com.
+
+### Setup (about 5 minutes, once)
+1. Open **sheets.google.com** and create a blank sheet. Name it "Torn Tracker".
+2. Menu **Extensions → Apps Script**. Delete what's there.
+3. Open this link, select all the text, copy it, paste it into Apps Script, and tap **Save** (💾):
+   `https://raw.githubusercontent.com/SarcasticGeekJr/torn-watch-geek/main/tracker/Code.gs`
+4. Go back to the sheet and reload it. A **🛰 Torn Tracker** menu appears (it can take a few seconds).
+5. **🛰 Torn Tracker → Setup.** Google asks for permission: tap **Continue**, choose your account, then **Advanced → Go to Torn Tracker (unsafe) → Allow**. ("Unsafe" only means Google hasn't reviewed your own private script.)
+6. In the Setup panel: paste your API key, keep or change the ntfy topic, tick the alerts you want, tap **Save and start tracking**.
+7. In Apps Script: **Deploy → New deployment** → gear ⚙ → **Web app**. Execute as: **Me**. Who has access: **Anyone**. Tap **Deploy** (allow again if asked).
+8. Back in the sheet: **🛰 Torn Tracker → Show my link**. Copy the link.
+9. In Torn Watch Geek: **⚙ Settings → Background tracker link** → paste → **Check tracker**. It should say ✅ Connected.
+10. Phone alerts (optional): install **ntfy** from the app store, tap **+**, and subscribe to the topic name shown in Setup.
+
+The watched players list is sent to the tracker automatically from Torn Watch Geek.
+
 ## API use
 - All Torn API calls go through one queue, capped at **30 a minute** by default (change it in ⚙). Torn allows 100 a minute shared by all your tools.
 - Watched players: 1 call per player per check (default every 60s) plus 1 per bazaar check (every 5 min).

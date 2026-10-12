@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Watch Geek
 // @namespace    https://github.com/SarcasticGeekJr/torn-watch-geek
-// @version      1.4.2
+// @version      1.5.0
 // @description  Watch players (online, hospital, jail, flight landing times, bazaar and Item Market listings) and find mug targets: rich sellers, sleeping workers in high-paying companies, and your own advanced search, all with estimated battle stats and win chance. Built for Torn PDA, works in Tampermonkey too.
 // @author       SarcasticGeekJr
 // @match        https://www.torn.com/*
@@ -11,6 +11,8 @@
 // @connect      www.tornstats.com
 // @connect      weav3r.dev
 // @connect      raw.githubusercontent.com
+// @connect      script.google.com
+// @connect      script.googleusercontent.com
 // @run-at       document-end
 // @homepageURL  https://github.com/SarcasticGeekJr/torn-watch-geek
 // @supportURL   https://github.com/SarcasticGeekJr/torn-watch-geek/issues
@@ -48,7 +50,7 @@
 
   // ---------------------------------------------------------------- config
   const PDA_KEY = "###PDA-APIKEY###"; // Torn PDA replaces this with your key at runtime
-  const VERSION = "1.4.2"; // keep in sync with @version above
+  const VERSION = "1.5.0"; // keep in sync with @version above
   const UPDATE_URL = "https://raw.githubusercontent.com/SarcasticGeekJr/torn-watch-geek/main/torn-watch-geek.user.js";
   const TORN = "https://api.torn.com";
   const FFS = "https://ffscouter.com/api/v1/get-stats";
@@ -92,6 +94,7 @@
     plunder: 0, // % bonus from a Plunder weapon
     wageShare: 30, // % of a company's daily income per employee assumed to be paid as wages
     useFF: true, // send the key to FF Scouter for stat estimates
+    bgUrl: "", // private link to your own background tracker (Google Apps Script)
     salesScan: true, // watch TornW3B bazaar listings for sales
     salesItems: 20, // how many popular items to scan
     salesScanMin: 10,
@@ -487,6 +490,23 @@
     saveSoon("watch");
   }
 
+  // A flight took between minD and maxD. If that fits exactly one ticket, remember it (and the plane type link).
+  function learnTicket(w, country, plane, minD, maxD) {
+    if (!FLIGHT[country] || !(maxD > 0)) return "";
+    const fits = [0, 1, 2, 3].filter((k) => {
+      const f = flightMs(country, k),
+        band = f * 0.03 + MIN;
+      return maxD >= f - band && minD <= f + band;
+    });
+    if (fits.length !== 1) return "";
+    w.ticket = fits[0];
+    if (plane) {
+      PLANES[plane] = PLANES[plane] || [0, 0, 0, 0];
+      PLANES[plane][fits[0]]++;
+      store.set("planes", PLANES);
+    }
+    return ` · flies ${TICKETS[fits[0]]}`;
+  }
   const planeOf = (p) => (p && p.status && (p.status.plane_image_type || p.status.travel_type)) || undefined;
   // Called with each fresh profile of a watched player. Works out trips, landings and alerts.
   function updateWatched(id, p) {
@@ -517,32 +537,14 @@
       }
       if (cur.trip && tripKey(prev.trip) !== tripKey(cur.trip)) {
         w.trip = { dir: cur.trip.dir, country: cur.trip.country, depLo: fresh && !prev.trip ? prevSeen : 0, depHi: t, plane: planeOf(p) };
+        bgTripTimes(id, w.trip);
         const e = tripEstimate(w);
         event(id, "travel", (cur.trip.dir === "back" ? `flying back to Torn${cur.trip.country ? " from " + cur.trip.country : ""}` : `flying to ${cur.trip.country}`) + (e && !e.unknown && e.known ? ` · lands ${clock(e.lo)}–${clock(e.hi)}` : " (already in the air when tracking started)"));
       }
       if (prev.trip && !cur.trip) {
         const trip = w.trip;
         let learned = "";
-        if (trip && trip.depLo && fresh && FLIGHT[trip.country]) {
-          // Flight took between (arrLo - depHi) and (arrHi - depLo). Match it to one ticket type.
-          const minD = prevSeen - trip.depHi,
-            maxD = t - trip.depLo;
-          const fits = [0, 1, 2, 3].filter((k) => {
-            const f = flightMs(trip.country, k),
-              band = f * 0.03 + MIN;
-            return maxD >= f - band && minD <= f + band;
-          });
-          if (fits.length === 1) {
-            w.ticket = fits[0];
-            learned = ` · flies ${TICKETS[fits[0]]}`;
-            // Teach the plane type -> ticket link from this real flight.
-            if (trip.plane) {
-              PLANES[trip.plane] = PLANES[trip.plane] || [0, 0, 0, 0];
-              PLANES[trip.plane][fits[0]]++;
-              store.set("planes", PLANES);
-            }
-          }
-        }
+        if (trip && trip.depLo && fresh) learned = learnTicket(w, trip.country, trip.plane, prevSeen - trip.depHi, t - trip.depLo);
         const where = prev.trip.dir === "back" ? "Torn" : prev.trip.country;
         event(id, "land", `landed in ${where}${learned}${late}`);
         w.trip = null;
@@ -556,6 +558,7 @@
       }
     } else if (cur.trip) {
       w.trip = { dir: cur.trip.dir, country: cur.trip.country, depLo: 0, depHi: t, plane: planeOf(p) };
+      bgTripTimes(id, w.trip);
     }
     if (w.trip && cur.trip) {
       if (!w.trip.plane && planeOf(p)) w.trip.plane = planeOf(p);
@@ -1171,6 +1174,84 @@
     const keys = Object.keys(SNAP);
     if (keys.length > 150) keys.sort((a, b) => SNAP[a].t - SNAP[b].t).slice(0, keys.length - 150).forEach((k) => delete SNAP[k]);
     saveSoon("snap");
+  }
+
+  // ---------------------------------------------------------------- Background tracker (your own Google Apps Script)
+  // The tracker checks your watched players every minute even when Torn is closed and keeps a log.
+  // Here we send it the watch list and pull in what it saw, so take-off and landing times are exact.
+  const BG = store.get("bg", { since: 0, sent: "", at: 0, err: "", status: null, trips: {}, seen: [] });
+  const bgOn = () => /^https:\/\/script\.google(usercontent)?\.com\//.test((S.bgUrl || "").trim());
+  function bgCall(params) {
+    const u = S.bgUrl.trim();
+    return httpGet(u + (u.includes("?") ? "&" : "?") + params + "&_=" + now());
+  }
+  let bgBusy = false;
+  async function bgSync(force) {
+    if (!bgOn() || bgBusy || (document.hidden && !force)) return;
+    if (!force && now() - (BG.at || 0) < 90 * SEC) return;
+    bgBusy = true;
+    BG.at = now();
+    try {
+      const ids = Object.keys(W)
+        .map(Number)
+        .sort((a, b) => a - b)
+        .join(",");
+      if (ids !== BG.sent) {
+        const w = await bgCall("a=watch&ids=" + ids);
+        if (w.error) throw new Error(w.error);
+        BG.sent = ids;
+      }
+      const d = await bgCall("a=events&since=" + (BG.since || now() - DAY));
+      if (d.error) throw new Error(d.error);
+      const evs = (d.events || []).sort((a, b) => a.t - b.t);
+      evs.forEach(applyBg);
+      if (evs.length) BG.since = Math.max(BG.since || 0, ...evs.map((e) => e.t));
+      BG.status = { lastTick: d.lastTick, dead: d.dead || "", version: d.version };
+      BG.err = d.dead ? "Tracker stopped: " + d.dead : "";
+      if (evs.length) {
+        saveSoon("events");
+        updateBadge();
+        if (isOpen() && view.name !== "settings") renderSoon(); // don't wipe the Settings check result
+      }
+    } catch (e) {
+      BG.err = e.message;
+    } finally {
+      bgBusy = false;
+      store.set("bg", BG);
+    }
+  }
+  // Exact take-off window from the tracker for a trip the script is showing.
+  function bgTripTimes(id, trip) {
+    const bt = BG.trips[id];
+    if (!bt || !trip || bt.key !== tripKey(trip) || !bt.depLo || now() - bt.depHi > 6 * HOUR) return;
+    Object.assign(trip, { depLo: bt.depLo, depHi: bt.depHi, manual: false, bg: true });
+    if (bt.plane && !trip.plane) trip.plane = bt.plane;
+  }
+  function applyBg(e) {
+    const key = e.t + ":" + e.id + ":" + e.kind + ":" + e.text;
+    if (BG.seen.includes(key)) return;
+    BG.seen = [key, ...BG.seen].slice(0, 400);
+    const x = e.x || {};
+    const w = W[e.id];
+    if (e.kind === "travel" && x.depHi) {
+      BG.trips[e.id] = { key: x.dir + ":" + x.country, depLo: x.depLo || 0, depHi: x.depHi, plane: x.plane || "" };
+      if (w && w.trip) bgTripTimes(e.id, w.trip);
+    }
+    if (e.kind === "land" && w && x.depLo && x.arrLo) learnTicket(w, x.country, x.plane, x.arrLo - x.depHi, x.arrHi - x.depLo);
+    if (e.kind === "bazaar" && x.sold) addSale(e.id, x.sold, e.text, "bazaar");
+    // Feed: skip what this script already logged itself around the same time.
+    if (EVENTS.some((v) => v.pid === e.id && v.kind === e.kind && Math.abs(v.t - e.t) < 3 * MIN)) return;
+    const name = (w && w.name) || e.name || "#" + e.id;
+    const ev = { t: e.t, pid: e.id, name, kind: e.kind === "travel" ? "travel" : e.kind, text: e.text + " · 🛰️", seen: false, bg: true };
+    EVENTS.push(ev);
+    EVENTS.sort((a, b) => b.t - a.t);
+    if (EVENTS.length > EVENTS_MAX) EVENTS.length = EVENTS_MAX;
+    if (w) {
+      w.log = [{ t: e.t, kind: ev.kind, text: ev.text }, ...(w.log || [])].sort((a, b) => b.t - a.t).slice(0, 60);
+      saveSoon("watch");
+    }
+    // Only pop up things that just happened.
+    if (now() - e.t < 3 * MIN && S.alerts[ev.kind] && S.alertPopup) showAlert(ev);
   }
 
   // ---------------------------------------------------------------- Item Market page reading
@@ -2244,10 +2325,10 @@
   // API Terms of Service table, as Torn asks every tool to show where the key is entered.
   function tosTable() {
     const rows = [
-      ["Data storage", "Only locally (on this phone, in the browser's storage)"],
+      ["Data storage", "Only locally (on this phone). If you set up the background tracker, also in your own Google Sheet"],
       ["Data sharing", "Nobody. Player IDs you look up go to FF Scouter for stat estimates (if turned on)"],
       ["Purpose of use", "Competitive advantage: tracking players and finding mug targets (players holding cash after bazaar / Item Market sales, inactive workers)"],
-      ["Key storage & sharing", "Stored locally / Shared with FF Scouter (stat estimates, can be turned off)"],
+      ["Key storage & sharing", "Stored locally / Shared with FF Scouter (stat estimates, can be turned off). The background tracker keeps its own copy in your Google account"],
       ["Key access level", "Public. Limited is only used, if you have it, to read your own battle stats and your own events (mug results)"],
     ];
     return `<details class="more tos"><summary>API key terms of use (Torn ToS)</summary><table class="tos-t">${rows.map(([a, b]) => `<tr><th>${a}</th><td>${b}</td></tr>`).join("")}</table></details>`;
@@ -2288,6 +2369,14 @@
         </label>
         <p class="muted small">Only used to read your own events ("...mugged them for $X") so the script can learn from your mugs. Only sent to api.torn.com.</p>
         <p class="muted small">Only sent to tornstats.com, to read spy reports on a player's page. Their terms: <a href="https://www.tornstats.com" target="_blank" rel="noopener">tornstats.com</a></p>
+
+        <h3>🛰️ Background tracker</h3>
+        <p class="muted small">Your own free Google script that checks your watched players every minute, even when Torn is closed, with phone alerts. Setup steps: <a href="https://github.com/SarcasticGeekJr/torn-watch-geek#background-tracker" target="_blank" rel="noopener">github.com/SarcasticGeekJr/torn-watch-geek</a></p>
+        <label class="blk">Background tracker link
+          <input class="key" data-k="bgUrl" type="password" autocomplete="off" placeholder="https://script.google.com/macros/s/.../exec?s=..." value="${esc(S.bgUrl || "")}">
+        </label>
+        <button class="btn ghost" data-act="bgCheck">Check tracker</button>
+        <div class="bgout small ${BG.err ? "r" : "muted"}">${bgOn() ? (BG.err ? esc(BG.err) : BG.status ? `Connected · last check ${BG.status.lastTick ? ago(BG.status.lastTick) : "not yet"} · synced ${BG.at ? ago(BG.at) : "never"}` : "") : ""}</div>
 
         <h3>API use</h3>
         ${numIn("apiPerMin", "Max Torn API calls per minute", 'min="5" max="100"')}
@@ -2380,6 +2469,7 @@
     stats(id).then(() => isOpen() && renderSoon());
     W[id].bzNext = now() + Math.max(2, +S.bazaarMin || 5) * MIN;
     checkBazaar(id).catch(() => {});
+    setTimeout(() => bgSync(true), 500);
   }
 
   root.addEventListener("click", async (e) => {
@@ -2425,6 +2515,7 @@
       case "watchDel":
         delete W[id];
         saveSoon("watch");
+        setTimeout(() => bgSync(true), 500);
         toast("Stopped watching");
         render();
         break;
@@ -2579,6 +2670,30 @@
         } catch {}
         out.className = "fftest small " + (ok ? "g" : "r");
         out.innerHTML = `${ok ? "✅ FF Scouter works with this key." : "❌ FF Scouter said no."} <br><span class="muted">Key used: ${esc(key.slice(0, 4))}…${esc(key.slice(-2))} · status ${esc(status)} · reply: ${esc(String(text).slice(0, 220))}</span>`;
+        break;
+      }
+      case "bgCheck": {
+        const out = $(".bgout");
+        if (!bgOn()) {
+          out.className = "bgout small r";
+          out.textContent = "Paste the link from the tracker sheet (Torn Tracker > Show my link).";
+          break;
+        }
+        out.className = "bgout small muted";
+        out.textContent = "Checking…";
+        try {
+          const d = await bgCall("a=ping");
+          if (d.error) throw new Error(d.error);
+          BG.sent = "";
+          await bgSync(true);
+          out.className = "bgout small " + (d.dead ? "r" : "g");
+          out.textContent = d.dead
+            ? "Tracker stopped: " + d.dead + ". Run Setup in the sheet again."
+            : `✅ Connected (tracker v${d.version}). ${d.running ? "Checking every minute" : "Not running: open the sheet and run Setup"} · last check ${d.lastTick ? ago(d.lastTick) : "not yet"} · tracks up to ${d.max} players.`;
+        } catch (er) {
+          out.className = "bgout small r";
+          out.textContent = "❌ Couldn't reach the tracker: " + er.message + ". Check the link and that the deployment allows Anyone.";
+        }
         break;
       }
       case "evCheck":
@@ -2760,12 +2875,18 @@
     setInterval(() => scanSales(false), MIN);
     setInterval(liveTick, 500);
     setInterval(() => checkMugEvents(false), 30 * SEC);
+    setInterval(() => bgSync(false), 30 * SEC);
+    setTimeout(() => bgSync(true), 3 * SEC);
     setTimeout(() => scanSales(false), 20 * SEC);
     // Live countdowns on the Watch tab
     setInterval(() => isOpen() && (view.name === "watch" || view.name === "player") && renderSoon(), 30 * SEC);
     window.addEventListener("hashchange", onRoute);
     addEventListener("pagehide", () => store.set("db", DB));
-    document.addEventListener("visibilitychange", () => !document.hidden && pollWatch());
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) return;
+      pollWatch();
+      bgSync(true);
+    });
     // Torn's pages change the URL with pushState too.
     let lastUrl = location.href;
     setInterval(() => {
