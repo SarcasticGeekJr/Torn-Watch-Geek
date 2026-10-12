@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Watch Geek
 // @namespace    https://github.com/SarcasticGeekJr/torn-watch-geek
-// @version      1.5.3
+// @version      1.6.0
 // @description  Watch players (online, hospital, jail, flight landing times, bazaar and Item Market listings) and find mug targets: rich sellers, sleeping workers in high-paying companies, and your own advanced search, all with estimated battle stats and win chance. Built for Torn PDA, works in Tampermonkey too.
 // @author       SarcasticGeekJr
 // @match        https://www.torn.com/*
@@ -50,7 +50,7 @@
 
   // ---------------------------------------------------------------- config
   const PDA_KEY = "###PDA-APIKEY###"; // Torn PDA replaces this with your key at runtime
-  const VERSION = "1.5.3"; // keep in sync with @version above
+  const VERSION = "1.6.0"; // keep in sync with @version above
   const UPDATE_URL = "https://raw.githubusercontent.com/SarcasticGeekJr/torn-watch-geek/main/torn-watch-geek.user.js";
   const TORN = "https://api.torn.com";
   const FFS = "https://ffscouter.com/api/v1/get-stats";
@@ -104,7 +104,7 @@
     fab: null,
     tab: "watch",
     hunt: "live",
-    live: { running: false, min: 1000000, max: "", onlyAway: false, win: "", item: "", alertMin: 1000000, poolMax: 30, calls: 25 },
+    live: { running: false, poolMode: "beatable", min: 1000000, max: "", onlyAway: false, win: "", item: "", alertMin: 1000000, poolMax: 30, calls: 25 },
     sleep: { types: [], days: 14, minStars: 0, companies: 40, okOnly: true, pick: "mix" },
     search: {
       name: "", faction: "", lvlMin: "", lvlMax: "", inMin: "", inMax: "", okOnly: true, nwMin: "", offMin: "", offMax: "",
@@ -1002,27 +1002,44 @@
   }
 
   let poolFillAt = store.get("poolFillAt", 0);
+  // Pool modes: "beatable" = mid-size TornW3B sellers, without anyone known to be 🔴 Avoid for you;
+  // "biggest" = Torn's weekly top-earning bazaars plus the biggest TornW3B sellers.
+  const POOL_MIN = 5e6,
+    POOL_MAX = 1e9;
   async function fillPool(force) {
     if (!force && now() - poolFillAt < 30 * MIN) return;
     poolFillAt = now();
     store.set("poolFillAt", poolFillAt);
-    try {
-      const list = await weeklyTopBazaars();
-      list.forEach((b) => {
-        upsert(b.id, { n: b.name, wk: b.weekly, src: "weekly" });
-        addToPool(b.id, b.name, "weekly");
-      });
-    } catch {}
-    // Biggest sellers seen on TornW3B
+    const beatable = S.live.poolMode !== "biggest";
+    if (!beatable) {
+      try {
+        const list = await weeklyTopBazaars();
+        list.forEach((b) => {
+          upsert(b.id, { n: b.name, wk: b.weekly, src: "weekly" });
+          addToPool(b.id, b.name, "weekly");
+        });
+      } catch {}
+    }
+    // Sellers seen on TornW3B, by how much they have listed
     const tot = {};
     for (const [k, sn] of Object.entries(SNAP)) {
       if (!k.startsWith("w:")) continue;
       for (const [pid, [q, p]] of Object.entries(sn.by)) tot[pid] = (tot[pid] || 0) + q * p;
     }
-    Object.entries(tot)
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, Math.max(1, +S.live.poolMax || 30))
-      .forEach(([pid]) => addToPool(pid, (DB[pid] && DB[pid].n) || "", "w3b"));
+    if (beatable && !Object.keys(tot).length && force) {
+      await scanSales(true); // nothing seen yet: look at TornW3B once
+      return fillPool(false);
+    }
+    let cands = Object.entries(tot).sort((a, b) => b[1] - a[1]);
+    if (beatable) {
+      cands = cands.filter(([, v]) => v >= POOL_MIN && v <= POOL_MAX).slice(0, 150);
+      // Stats come from FF Scouter, 100 per request: drop anyone you can't beat.
+      await Promise.all(cands.map(([pid]) => stats(+pid)));
+      cands = cands.filter(([pid]) => winOf(+pid).k !== "avoid");
+      for (const [pid, m] of Object.entries(POOL)) if (!m.manual && winOf(+pid).k === "avoid") delete POOL[pid];
+      saveSoon("pool");
+    }
+    cands.slice(0, Math.max(1, +S.live.poolMax || 30)).forEach(([pid]) => addToPool(pid, (DB[pid] && DB[pid].n) || "", "w3b"));
   }
 
   function pushLive(row) {
@@ -1035,12 +1052,16 @@
     maybeMugAlert(row.pid, before);
     drawLiveSoon();
   }
-  function maybeMugAlert(pid, before) {
+  async function maybeMugAlert(pid, before) {
     const total = unbanked(pid);
     const at = +S.live.alertMin || +S.live.min || 0; // empty = same as the list's minimum
     if (!total || total < at || before >= at) return;
     const m = sellerOf(pid);
     const r = LIVE.find((x) => x.pid === +pid && isHot(x));
+    if (!r) return;
+    // Only alert for sales the list would show (min, max, win chance, item).
+    if (S.live.win && winOf(pid).k === "unk") await stats(pid);
+    if (liveFilterFail(r, Object.assign({}, S.live, { onlyAway: false }))) return;
     const w = winOf(pid);
     event(pid, "mug", `sold ~${short(total)} while away · ${awayText(r, m)}${w.k !== "unk" ? " · " + w.label : ""}`);
   }
@@ -1818,8 +1839,9 @@
       <p class="muted small">Torn delays bazaar data on purpose (to slow down mug bots), so a sale shows up a little after it happens. The time shown is Torn's.</p>
       <div class="live-list cards"></div>
       <details class="more pool"><summary>Seller pool: ${n} players${every ? ` · each checked about every ${dur(every * SEC) === "0m" ? Math.round(every) + "s" : dur(every * SEC)}` : ""}</summary>
-        <p class="muted small">Big sellers are checked one after another (1 API call each: their bazaar and status). The pool fills itself from Torn's weekly top-earning bazaars and big sellers found on TornW3B. Add anyone you like.</p>
+        <p class="muted small">Sellers are checked one after another (1 API call each: their bazaar and status). The pool fills itself from sellers found on TornW3B${f.poolMode === "biggest" ? " and Torn's weekly top-earning bazaars" : ", leaving out anyone who is 🔴 Avoid for you"}. Add anyone you like.</p>
         <div class="addrow"><input class="poolid" inputmode="numeric" placeholder="Player ID to add"><button class="btn" data-act="poolAdd">Add</button></div>
+        <label class="blk small">Which sellers<select data-lf="poolMode"><option value="beatable" ${f.poolMode !== "biggest" ? "selected" : ""}>Beatable sellers (recommended): mid-size bazaars, no 🔴 Avoid</option><option value="biggest" ${f.poolMode === "biggest" ? "selected" : ""}>Biggest sellers: Torn's top-earning bazaars</option></select></label>
         <div class="filters two">
           <label>Pool size<input data-lf="poolMax" type="number" inputmode="numeric" value="${esc(f.poolMax)}"></label>
           <label>API calls/min for live<input data-lf="calls" type="number" inputmode="numeric" value="${esc(f.calls)}"></label>
@@ -1836,6 +1858,11 @@
         const k = el.dataset.lf;
         f[k] = el.type === "checkbox" ? el.checked : el.value;
         if (["poolMax", "calls"].includes(k)) f[k] = Math.max(1, Math.min(k === "calls" ? 100 : 200, +el.value || DEFAULTS.live[k]));
+        if (k === "poolMode") {
+          for (const [pid, m] of Object.entries(POOL)) if (!m.manual) delete POOL[pid];
+          saveSoon("pool");
+          fillPool(true).then(() => S.hunt === "live" && view.name === "hunt" && liveForm());
+        }
         save();
         if (k === "min") $$(".chip[data-act=liveMin]").forEach((c) => c.classList.toggle("on", +c.dataset.v === +f.min));
         if (k === "max" && el.value === "") f.max = "";
@@ -1861,21 +1888,11 @@
     const max = +f.max || 0; // 0 = no maximum
     let noStats = 0;
     const why = {};
-    const out = (r) => ((why[r] = (why[r] || 0) + 1), false);
     const all = LIVE.filter((r) => {
-      const hot = isHot(r);
-      if (f.onlyAway && !hot) return out("not 🔥 away");
-      // The amount that matters: the sale, or for 🔥 sellers everything unbanked since they were last seen.
-      const amt = hot ? Math.max(r.v, unbanked(r.pid)) : r.v;
-      if (amt < min) return out("under " + short(min));
-      if (max && amt > max) return out("over " + short(max));
-      if (f.item && !r.item.toLowerCase().includes(f.item.toLowerCase())) return out("other items");
-      if (f.win) {
-        const k = winOf(r.pid).k;
-        if (k === "unk") noStats++;
-        if (WIN_ORDER[k] > WIN_ORDER[f.win]) return out(k === "unk" ? "no stats yet" : k === "avoid" ? "🔴 Avoid" : k === "risky" ? "🟠 Risky" : "🟡 Likely");
-      }
-      return true;
+      const reason = liveFilterFail(r, f);
+      if (reason === "no stats yet") noStats++;
+      if (reason) why[reason] = (why[reason] || 0) + 1;
+      return !reason;
     });
     const rows = all.slice(0, 100);
     const missing = [...new Set(LIVE.slice(0, 150).map((r) => r.pid))].filter(needStats);
@@ -1893,6 +1910,24 @@
       (rows.length
         ? rows.map(liveRow).join("")
         : `<p class="muted hint">${LIVE.length ? "No sales match these filters yet." : f.running ? "Watching… sales show up here the moment they're spotted." : "Tap ▶️ Start live. Sales show up here the moment they're spotted."}</p>`);
+  }
+  // "" when a sale passes the Live sales filters, else the reason it is hidden. Used by the list and the alerts.
+  function liveFilterFail(r, f) {
+    f = f || S.live;
+    const min = +f.min || 0,
+      max = +f.max || 0;
+    const hot = isHot(r);
+    if (f.onlyAway && !hot) return "not 🔥 away";
+    // The amount that matters: the sale, or for 🔥 sellers everything unbanked since they were last seen.
+    const amt = hot ? Math.max(r.v, unbanked(r.pid)) : r.v;
+    if (amt < min) return "under " + short(min);
+    if (max && amt > max) return "over " + short(max);
+    if (f.item && !String(r.item || "").toLowerCase().includes(f.item.toLowerCase())) return "other items";
+    if (f.win) {
+      const k = winOf(r.pid).k;
+      if (WIN_ORDER[k] > WIN_ORDER[f.win]) return k === "unk" ? "no stats yet" : k === "avoid" ? "🔴 Avoid" : k === "risky" ? "🟠 Risky" : "🟡 Likely";
+    }
+    return "";
   }
   function liveRow(r) {
     const m = sellerOf(r.pid);

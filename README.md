@@ -44,11 +44,11 @@ Updates: Torn PDA checks when the app starts (or Settings → Userscripts → �
 ### 🎯 Hunt
 **📡 Live sales:** a list that keeps updating with sales as they're spotted.
 - Tap **▶ Start live**. The script checks a **pool of big sellers** one after another: their bazaar and status in one API call each.
-- The pool fills itself from Torn's weekly top-earning bazaars and big sellers found on TornW3B. You can add anyone.
+- The pool fills itself. **Beatable sellers** (default): mid-size bazaars found on TornW3B ($5M–$1B listed), leaving out anyone who is 🔴 Avoid for you. **Biggest sellers**: Torn's weekly top-earning bazaars and the biggest TornW3B sellers. You can add anyone.
 - 🔥 means they sold **while away**: offline since the sale, flying, or abroad anywhere except the Cayman Islands (which has a bank). The money is probably still on hand.
 - Each 🔥 row shows the total unbanked since they were last seen, plus a mug estimate. When they come back, the row turns grey ("probably banked").
 - Filters: min and max amount (quick chips: $500k / $1M / $5M / $10M), only 🔥, win chance, item. A line above the list says which filters are on.
-- 🔥 alert (pop-up and vibration) when someone's unbanked total passes your alert amount.
+- 🔥 alert (pop-up and vibration) when someone's unbanked total passes your alert amount. Alerts follow the list's filters (min, max, win chance, item).
 - Speed: the default is 25 API calls a minute for live, and each seller is checked at most every 30 seconds. Torn **delays bazaar data on purpose** to slow down mug bots, so sales show up a little after they happen. Times shown are Torn's.
 - Watched players' bazaar sales and TornW3B sales also show up here.
 
