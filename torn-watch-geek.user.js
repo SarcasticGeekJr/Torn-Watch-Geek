@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Watch Geek
 // @namespace    https://github.com/SarcasticGeekJr/torn-watch-geek
-// @version      1.1.7
+// @version      1.1.8
 // @description  Watch players (online, hospital, jail, flight landing times, bazaar and Item Market listings) and find mug targets: rich sellers, sleeping workers in high-paying companies, and your own advanced search, all with estimated battle stats and win chance. Built for Torn PDA, works in Tampermonkey too.
 // @author       SarcasticGeekJr
 // @match        https://www.torn.com/*
@@ -48,7 +48,7 @@
 
   // ---------------------------------------------------------------- config
   const PDA_KEY = "###PDA-APIKEY###"; // Torn PDA replaces this with your key at runtime
-  const VERSION = "1.1.7"; // keep in sync with @version above
+  const VERSION = "1.1.8"; // keep in sync with @version above
   const UPDATE_URL = "https://raw.githubusercontent.com/SarcasticGeekJr/torn-watch-geek/main/torn-watch-geek.user.js";
   const TORN = "https://api.torn.com";
   const FFS = "https://ffscouter.com/api/v1/get-stats";
@@ -1506,9 +1506,21 @@
       </div>
     </div>`;
   }
+  // Hunt results are saved on the phone, so they're still there after visiting the attack page.
+  const SAVED_RES = store.get("results", {}); // mode -> { t, list, msg }
   function drawResults() {
     const box = $(".results");
     if (!box) return;
+    if (!(view.results && view.results.mode === S.hunt)) {
+      const sv = SAVED_RES[S.hunt];
+      if (sv && now() - sv.t < 6 * HOUR) {
+        view.results = { mode: S.hunt, list: sv.list };
+        view.msg = sv.msg || "";
+      }
+    } else {
+      SAVED_RES[S.hunt] = { t: now(), list: view.results.list.slice(0, 100), msg: view.msg || "" };
+      saveResults();
+    }
     setMsg(view.msg || "");
     const rs = view.results && view.results.mode === S.hunt ? view.results.list : null;
     if (!rs) {
@@ -1518,6 +1530,13 @@
     const shown = rs.filter((r) => !r.hidden);
     box.innerHTML = shown.length ? shown.slice(0, 80).map(resultCard).join("") : `<p class="muted hint">${S.hunt === "sleep" ? "No sleeping workers found. See the report above." : "No players match. Try looser filters or tap 'Find more players'."}</p>`;
   }
+  const saveResults = (() => {
+    let t = 0;
+    return () => {
+      clearTimeout(t);
+      t = setTimeout(() => store.set("results", SAVED_RES), 1000);
+    };
+  })();
   const drawSoon = (() => {
     let t = 0;
     return () => {
@@ -2126,6 +2145,12 @@
   }
 
   root.addEventListener("click", async (e) => {
+    const link = e.target.closest("a[href]");
+    if (link && /sid=attack/.test(link.getAttribute("href"))) {
+      try {
+        sessionStorage.setItem("twg_reopen", JSON.stringify({ t: now(), tab: S.tab, hunt: S.hunt }));
+      } catch {}
+    }
     const el = e.target.closest("[data-act]");
     if (!el) return;
     const act = el.dataset.act;
@@ -2189,6 +2214,7 @@
         S.hunt = el.dataset.mode;
         save();
         view.msg = "";
+        if (view.results && view.results.mode !== S.hunt) view.results = null;
         render();
         break;
       case "liveToggle":
@@ -2473,6 +2499,17 @@
       imTimer = setTimeout(scanMarketPage, 700);
     }).observe(document.body, { childList: true, subtree: true });
     onRoute();
+    // Back from an attack started in the script: open it again where you left off.
+    try {
+      const r = JSON.parse(sessionStorage.getItem("twg_reopen") || "null");
+      if (r && !/sid=attack/.test(location.href)) {
+        sessionStorage.removeItem("twg_reopen");
+        if (now() - r.t < 15 * MIN) {
+          view.name = r.tab || "hunt";
+          open();
+        }
+      }
+    } catch {}
   }
   if (document.body) boot();
   else document.addEventListener("DOMContentLoaded", boot);
