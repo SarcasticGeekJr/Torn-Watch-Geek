@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Watch Geek
 // @namespace    https://github.com/SarcasticGeekJr/torn-watch-geek
-// @version      1.1.2
+// @version      1.1.3
 // @description  Watch players (online, hospital, jail, flight landing times, bazaar and Item Market listings) and find mug targets: rich sellers, sleeping workers in high-paying companies, and your own advanced search, all with estimated battle stats and win chance. Built for Torn PDA, works in Tampermonkey too.
 // @author       SarcasticGeekJr
 // @match        https://www.torn.com/*
@@ -48,7 +48,7 @@
 
   // ---------------------------------------------------------------- config
   const PDA_KEY = "###PDA-APIKEY###"; // Torn PDA replaces this with your key at runtime
-  const VERSION = "1.1.2"; // keep in sync with @version above
+  const VERSION = "1.1.3"; // keep in sync with @version above
   const UPDATE_URL = "https://raw.githubusercontent.com/SarcasticGeekJr/torn-watch-geek/main/torn-watch-geek.user.js";
   const TORN = "https://api.torn.com";
   const FFS = "https://ffscouter.com/api/v1/get-stats";
@@ -905,7 +905,7 @@
   }
   function maybeMugAlert(pid, before) {
     const total = unbanked(pid);
-    const at = +S.live.alertMin || 0;
+    const at = +S.live.alertMin || +S.live.min || 0; // empty = same as the list's minimum
     if (!total || total < at || before >= at) return;
     const m = sellerOf(pid);
     const r = LIVE.find((x) => x.pid === +pid && isHot(x));
@@ -1556,7 +1556,7 @@
       <div class="filters">
         <label>Win chance<select data-lf="win"><option value="">Any</option><option value="easy" ${f.win === "easy" ? "selected" : ""}>🟢 Easy</option><option value="likely" ${f.win === "likely" ? "selected" : ""}>🟡 Likely+</option><option value="risky" ${f.win === "risky" ? "selected" : ""}>🟠 Risky+</option></select></label>
         <label>Item has<input data-lf="item" type="text" placeholder="any" value="${esc(f.item)}"></label>
-        <label>Alert me at<input data-lf="alertMin" type="number" inputmode="numeric" value="${esc(f.alertMin)}"></label>
+        <label>Alert me at<input data-lf="alertMin" type="number" inputmode="numeric" placeholder="same as min" value="${esc(f.alertMin)}"></label>
       </div>
       <label class="tog"><input type="checkbox" data-lf="onlyAway" ${f.onlyAway ? "checked" : ""}> Only 🔥 away (offline since the sale, flying, or abroad outside Cayman)</label>
       <p class="muted small">Torn delays bazaar data on purpose (to slow down mug bots), so a sale shows up a little after it happens. The time shown is Torn's.</p>
@@ -1601,17 +1601,29 @@
     const n = Object.keys(POOL).length;
     if (st) st.innerHTML = f.running ? `<span class="g">● Live</span> · ${n} sellers${liveLast ? ` · last check ${clock(liveLast)}` : ""}${apiQueued() ? " · waiting for API limit" : ""}` : `<span class="muted">Paused</span>`;
     const min = +f.min || 0;
-    const rows = LIVE.filter((r) => {
+    let noStats = 0;
+    const all = LIVE.filter((r) => {
       const hot = isHot(r);
       if (f.onlyAway && !hot) return false;
       if (r.v < min && !(hot && unbanked(r.pid) >= min)) return false;
       if (f.item && !r.item.toLowerCase().includes(f.item.toLowerCase())) return false;
-      if (f.win && WIN_ORDER[winOf(r.pid).k] > WIN_ORDER[f.win]) return false;
+      if (f.win) {
+        const k = winOf(r.pid).k;
+        if (k === "unk") noStats++;
+        if (WIN_ORDER[k] > WIN_ORDER[f.win]) return false;
+      }
       return true;
-    }).slice(0, 100);
-    box.innerHTML = rows.length
-      ? rows.map(liveRow).join("")
-      : `<p class="muted hint">${LIVE.length ? "No sales match these filters yet." : f.running ? "Watching… sales show up here the moment they're spotted." : "Tap ▶️ Start live. Sales show up here the moment they're spotted."}</p>`;
+    });
+    const rows = all.slice(0, 100);
+    // Say exactly which filters are on, so it's clear what is being used.
+    const winLbl = { easy: "🟢 Easy", likely: "🟡 Likely or better", risky: "🟠 Risky or better" }[f.win];
+    const on = [`sales of ${short(min)} or more`, f.onlyAway ? "🔥 away only" : "", winLbl ? winLbl + " only" : "", f.item ? `item has "${esc(f.item)}"` : ""].filter(Boolean);
+    const sum = `<p class="small livesum">Showing <b>${all.length}</b> of ${LIVE.length} sales · ${on.join(" · ")}${noStats ? ` · <span class="a">${noStats} hidden because their stats haven't loaded${ffErr ? ` (${esc(ffErr)})` : ""}</span>` : ""}</p>`;
+    box.innerHTML =
+      sum +
+      (rows.length
+        ? rows.map(liveRow).join("")
+        : `<p class="muted hint">${LIVE.length ? "No sales match these filters yet." : f.running ? "Watching… sales show up here the moment they're spotted." : "Tap ▶️ Start live. Sales show up here the moment they're spotted."}</p>`);
   }
   function liveRow(r) {
     const m = sellerOf(r.pid);
@@ -1944,6 +1956,8 @@
         <label class="tog col"><span><input type="checkbox" data-s="useFF" ${S.useFF ? "checked" : ""}> <b>Use FF Scouter for battle stats and win chance</b></span>
           <small class="muted">Sends your key and the player IDs you look at to ffscouter.com. Register your key there once. Their terms: <a href="https://ffscouter.com" target="_blank" rel="noopener">ffscouter.com</a></small></label>
         ${ffErr ? `<p class="small r">${esc(ffErr)}</p>` : ""}
+        <button class="btn ghost" data-act="ffTest">Test FF Scouter</button>
+        <div class="fftest small muted"></div>
         <label class="blk">Torn Stats key <small class="muted">(optional, for spy reports)</small>
           <input class="key" data-k="tsKey" type="password" autocomplete="off" placeholder="leave empty if you don't use Torn Stats" value="${esc(S.tsKey)}">
         </label>
@@ -2179,6 +2193,51 @@
         open();
         go("player", id);
         break;
+      case "ffTest": {
+        const out = $(".fftest");
+        const key = apiKey();
+        if (!key) {
+          out.textContent = "No API key yet.";
+          break;
+        }
+        out.className = "fftest small muted";
+        out.textContent = "Asking FF Scouter…";
+        // Raw request, so we can show exactly what FF Scouter answers.
+        const target = myId || 1;
+        const url = `${FFS}?key=${encodeURIComponent(key)}&targets=${target}&t=${Date.now()}`;
+        let status = "?",
+          text = "";
+        try {
+          if (typeof window.PDA_httpGet === "function") {
+            const r = await window.PDA_httpGet(url, {});
+            status = r ? r.status : "no answer";
+            text = r ? r.responseText : "";
+          } else if (typeof GM_xmlhttpRequest === "function") {
+            const r = await new Promise((res, rej) => GM_xmlhttpRequest({ method: "GET", url, onload: res, onerror: () => rej(new Error("network error")) }));
+            status = r.status;
+            text = r.responseText;
+          } else {
+            const r = await fetch(url);
+            status = r.status;
+            text = await r.text();
+          }
+        } catch (er) {
+          text = er.message;
+        }
+        let ok = false;
+        try {
+          const d = JSON.parse(text);
+          const arr = Array.isArray(d) ? d : d.data || d.results || [];
+          ok = Array.isArray(arr) && !d.error;
+          if (ok) {
+            ffErr = "";
+            for (const k of Object.keys(ffTried)) delete ffTried[k];
+          }
+        } catch {}
+        out.className = "fftest small " + (ok ? "g" : "r");
+        out.innerHTML = `${ok ? "✅ FF Scouter works with this key." : "❌ FF Scouter said no."} <br><span class="muted">Key used: ${esc(key.slice(0, 4))}…${esc(key.slice(-2))} · status ${esc(status)} · reply: ${esc(String(text).slice(0, 220))}</span>`;
+        break;
+      }
       case "testAlert":
         showAlert({ t: now(), pid: myId || 1, name: "Test", kind: "land", text: "landed in Japan · flies Airstrip" });
         break;
@@ -2436,6 +2495,8 @@ input:focus, select:focus { border-color: var(--acc); }
 .livebar .btn.ghost { margin: 0; }
 .chip-in { width: 110px; padding: 5px 10px; border-radius: 999px; font-size: 13px; }
 .live-list { margin-top: 10px; }
+.livesum { margin: 0 2px 8px; color: var(--muted); }
+.fftest { margin: 4px 0 10px; word-break: break-word; }
 .lrow.hotrow { border-color: rgba(255,169,77,.6); }
 .hot { color: var(--orange); font-weight: 700; }
 details.pool .mini-list { margin-top: 8px; }
