@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Watch Geek
 // @namespace    https://github.com/SarcasticGeekJr/torn-watch-geek
-// @version      1.2.0
+// @version      1.2.1
 // @description  Watch players (online, hospital, jail, flight landing times, bazaar and Item Market listings) and find mug targets: rich sellers, sleeping workers in high-paying companies, and your own advanced search, all with estimated battle stats and win chance. Built for Torn PDA, works in Tampermonkey too.
 // @author       SarcasticGeekJr
 // @match        https://www.torn.com/*
@@ -48,7 +48,7 @@
 
   // ---------------------------------------------------------------- config
   const PDA_KEY = "###PDA-APIKEY###"; // Torn PDA replaces this with your key at runtime
-  const VERSION = "1.2.0"; // keep in sync with @version above
+  const VERSION = "1.2.1"; // keep in sync with @version above
   const UPDATE_URL = "https://raw.githubusercontent.com/SarcasticGeekJr/torn-watch-geek/main/torn-watch-geek.user.js";
   const TORN = "https://api.torn.com";
   const FFS = "https://ffscouter.com/api/v1/get-stats";
@@ -1790,7 +1790,27 @@
     const types = (CTYPES && CTYPES.types) || {};
     const n = Object.keys(DB).length;
     const inp = (k, ph, mode = "numeric") => `<input data-f="${k}" ${mode === "numeric" ? 'type="number" inputmode="numeric"' : 'type="text"'} placeholder="${ph}" value="${esc(f[k])}">`;
+    // Quick buttons: Oil Rig, Mining Corporation, plus anything already picked.
+    const quick = Object.entries(types).filter(([id, nm]) => /oil rig|mining/i.test(nm) || f.ctypes.includes(+id));
     $(".hunt-form").innerHTML = `
+      <div class="cbox">
+        <div class="cbox-h">🏢 <b>Company workers</b> <span class="muted small">(optional) find inactive workers whose pay piles up as cash</span></div>
+        <div class="chips">${quick
+          .map(([id, nm]) => `<button class="chip ${f.ctypes.includes(+id) ? "on" : ""}" data-act="sctype" data-id="${id}">${esc(nm)}</button>`)
+          .join("")}</div>
+        <div class="small cpicked">${f.ctypes.length ? "Picked: <b>" + f.ctypes.map((t) => esc(typeName(t))).join(", ") + "</b>" : "None picked: searching your saved players only."}</div>
+        <details class="more ctypes"><summary>All company types and options</summary>
+          <p class="muted small">Search reads the picked companies' worker lists first (1 API call per company, saved for 6 hours), adds the workers, then applies your filters. Each worker shows a guess of their unbanked pay.</p>
+          <div class="chips">${Object.entries(types)
+            .sort((a, b) => a[1].localeCompare(b[1]))
+            .map(([id, nm]) => `<button class="chip ${f.ctypes.includes(+id) ? "on" : ""}" data-act="sctype" data-id="${id}">${esc(nm)}</button>`)
+            .join("")}</div>
+          <div class="filters two">
+            <label>Companies to read<input data-f="companies" type="number" inputmode="numeric" value="${esc(f.companies)}"></label>
+            <label>Which companies<select data-f="pick"><option value="mix" ${f.pick !== "top" ? "selected" : ""}>Mix (all sizes)</option><option value="top" ${f.pick === "top" ? "selected" : ""}>Best pay first</option></select></label>
+          </div>
+        </details>
+      </div>
       <div class="filters two">
         <label>Name has${inp("name", "any", "text")}</label>
         <label>Faction (name or ID)${inp("faction", "any", "text")}</label>
@@ -1819,17 +1839,6 @@
           .map(([v, l]) => `<option value="${v}" ${f.sort === v ? "selected" : ""}>${l}</option>`)
           .join("")}</select></label>
       </div>
-      <details class="more ctypes" ${f.ctypes.length ? "open" : ""}><summary>Company types: ${f.ctypes.length ? f.ctypes.map((t) => esc(typeName(t))).join(", ") : "any"}</summary>
-        <p class="muted small">Pick types (for example Oil Rig and Mining Corporation) to find their workers. Search reads those companies' worker lists (1 API call per company, saved for 6 hours), adds the workers to your list, and shows a guess of their unbanked pay. Wages land as cash on hand, so inactive workers pile it up.</p>
-        <div class="chips">${Object.entries(types)
-          .sort((a, b) => a[1].localeCompare(b[1]))
-          .map(([id, nm]) => `<button class="chip ${f.ctypes.includes(+id) ? "on" : ""}" data-act="sctype" data-id="${id}">${esc(nm)}</button>`)
-          .join("")}</div>
-        <div class="filters two">
-          <label>Companies to read<input data-f="companies" type="number" inputmode="numeric" value="${esc(f.companies)}"></label>
-          <label>Which companies<select data-f="pick"><option value="mix" ${f.pick !== "top" ? "selected" : ""}>Mix (all sizes)</option><option value="top" ${f.pick === "top" ? "selected" : ""}>Best pay first</option></select></label>
-        </div>
-      </details>
       <label class="tog"><input type="checkbox" data-f="okOnly" ${f.okOnly ? "checked" : ""}> Only Okay (not hospital, jail or flying)</label>
       <label class="tog"><input type="checkbox" data-f="noClothing" ${f.noClothing ? "checked" : ""}> Hide 7★+ clothing store workers (−75% mug)</label>
       <label class="tog">Hide players I mugged in the last<input class="num" data-f="hideMugged" type="number" inputmode="numeric" value="${esc(f.hideMugged)}"> days</label>
@@ -1852,8 +1861,9 @@
       const q = f.faction.trim().toLowerCase();
       if (/^\d+$/.test(q) ? +q !== p.f : !(p.fn || "").toLowerCase().includes(q)) return "faction";
     }
-    if (L(f.lvlMin) != null && (p.lv == null || p.lv < +f.lvlMin)) return "level";
-    if (L(f.lvlMax) != null && (p.lv == null || p.lv > +f.lvlMax)) return "level";
+    // Level may be unknown (company worker lists don't include it); the player check fills it in.
+    if (L(f.lvlMin) != null && p.lv != null && p.lv < +f.lvlMin) return "level";
+    if (L(f.lvlMax) != null && p.lv != null && p.lv > +f.lvlMax) return "level";
     const inact = daysSince(p.la);
     if (L(f.inMin) != null && (inact == null || inact < +f.inMin)) return "inactive days";
     if (L(f.inMax) != null && (inact == null || inact > +f.inMax)) return "inactive days";
@@ -1889,7 +1899,9 @@
       if (sf === true) return no("battle stats / win chance");
       if (sf === null) wait = true;
     }
-    if (needsProfile(f) && !p.pt) return null;
+    if ((needsProfile(f) || ((L(f.lvlMin) != null || L(f.lvlMax) != null) && p.lv == null)) && !p.pt) return null;
+    if (L(f.lvlMin) != null && (p.lv == null || p.lv < +f.lvlMin)) return no("level");
+    if (L(f.lvlMax) != null && (p.lv == null || p.lv > +f.lvlMax)) return no("level");
     if (f.okOnly && p.st && p.st !== "Okay") return no("not Okay right now");
     if (L(f.ageMin) != null && (p.age == null || p.age < +f.ageMin)) return no("days old");
     if (L(f.ageMax) != null && (p.age == null || p.age > +f.ageMax)) return no("days old");
@@ -1956,7 +1968,7 @@
       list.sort((a, b) => b.score - a.score);
       const pool = list.slice(0, 500);
       view.results = { mode: "search", list: [] };
-      view.msg = `${all.length.toLocaleString()} match the quick filters. Getting battle stats for ${pool.length}…`;
+      view.msg = `${scanNote}${all.length.toLocaleString()} match the quick filters. Getting battle stats for ${pool.length}…`;
       drawResults();
       await Promise.all(pool.map((r) => stats(r.id)));
       if (view.runId !== runId) return;
@@ -1965,7 +1977,7 @@
       list.forEach((r) => (r.score = targetScore(r.id, DB[r.id] || {})));
       if (!list.length) {
         view.results = { mode: "search", list: [] };
-        view.msg = `${all.length.toLocaleString()} match the quick filters, but none of the ${before} checked pass the battle stats / win chance filter${ffErr ? ` (${esc(ffErr)})` : ""}. Try 'Find more players' or a looser win chance.`;
+        view.msg = `${scanNote}${all.length.toLocaleString()} match the quick filters, but none of the ${before} checked pass the battle stats / win chance filter${ffErr ? ` (${esc(ffErr)})` : ""}. Try 'Find more players' or a looser win chance.`;
         drawResults();
         return;
       }
@@ -2008,7 +2020,7 @@
     };
     top.forEach(recheck);
     view.results = { mode: "search", list: top };
-    view.msg = `${all.length.toLocaleString()} match the quick filters. Checking the top ${top.length}…`;
+    view.msg = `${scanNote}${all.length.toLocaleString()} match the quick filters. Checking the top ${top.length}…`;
     drawResults();
     $(".hunt-msg").scrollIntoView({ behavior: "smooth", block: "start" });
     enrich(top, {
@@ -2276,9 +2288,9 @@
         const L = S.search.ctypes;
         S.search.ctypes = L.includes(t) ? L.filter((x) => x !== t) : [...L, t];
         save();
-        el.classList.toggle("on");
-        const sm = el.closest("details").querySelector("summary");
-        sm.textContent = "Company types: " + (S.search.ctypes.length ? S.search.ctypes.map(typeName).join(", ") : "any");
+        $$(`.chip[data-act=sctype][data-id="${t}"]`).forEach((c) => c.classList.toggle("on", S.search.ctypes.includes(t)));
+        const pk = $(".cpicked");
+        if (pk) pk.innerHTML = S.search.ctypes.length ? "Picked: <b>" + S.search.ctypes.map((x) => esc(typeName(x))).join(", ") + "</b>" : "None picked: searching your saved players only.";
         break;
       }
       case "searchGo":
@@ -2625,6 +2637,11 @@ input:focus, select:focus { border-color: var(--acc); }
 .chip-in { width: 110px; padding: 5px 10px; border-radius: 999px; font-size: 13px; }
 .live-list { margin-top: 10px; }
 .livesum { margin: 0 2px 8px; color: var(--muted); }
+.cbox { margin-top: 10px; padding: 10px; border: 1px solid var(--acc); border-radius: 12px; background: rgba(116,192,252,.06); }
+.cbox-h { font-size: 14px; }
+.cbox .chips { margin: 8px 0 4px; }
+.cpicked { margin-top: 2px; }
+.cbox details.more { margin-top: 6px; }
 .fftest { margin: 4px 0 10px; word-break: break-word; }
 .lrow.hotrow { border-color: rgba(255,169,77,.6); }
 .hot { color: var(--orange); font-weight: 700; }
