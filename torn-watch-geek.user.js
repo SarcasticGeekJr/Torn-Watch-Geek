@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Watch Geek
 // @namespace    https://github.com/SarcasticGeekJr/torn-watch-geek
-// @version      1.1.6
+// @version      1.1.7
 // @description  Watch players (online, hospital, jail, flight landing times, bazaar and Item Market listings) and find mug targets: rich sellers, sleeping workers in high-paying companies, and your own advanced search, all with estimated battle stats and win chance. Built for Torn PDA, works in Tampermonkey too.
 // @author       SarcasticGeekJr
 // @match        https://www.torn.com/*
@@ -48,7 +48,7 @@
 
   // ---------------------------------------------------------------- config
   const PDA_KEY = "###PDA-APIKEY###"; // Torn PDA replaces this with your key at runtime
-  const VERSION = "1.1.6"; // keep in sync with @version above
+  const VERSION = "1.1.7"; // keep in sync with @version above
   const UPDATE_URL = "https://raw.githubusercontent.com/SarcasticGeekJr/torn-watch-geek/main/torn-watch-geek.user.js";
   const TORN = "https://api.torn.com";
   const FFS = "https://ffscouter.com/api/v1/get-stats";
@@ -205,17 +205,23 @@
         })
       );
     }
-    return fetch(url).then((r) => {
-      if (!r.ok) throw new Error("HTTP " + r.status);
-      return r.json();
-    });
+    const ctrl = typeof AbortController === "function" ? new AbortController() : null;
+    const timer = ctrl && setTimeout(() => ctrl.abort(), 25 * SEC);
+    return fetch(url, ctrl ? { signal: ctrl.signal } : {})
+      .then((r) => {
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        return r.json();
+      })
+      .finally(() => timer && clearTimeout(timer));
   }
 
   // Torn PDA silently drops a GET for a URL it already fetched in the last 2s and resolves with
   // undefined, so wait out that window and try again instead of treating it as a response.
   async function pdaGet(url) {
     for (let attempt = 0; attempt < 3; attempt++) {
-      const r = await window.PDA_httpGet(url, {});
+      // Torn PDA sometimes never answers. Give up after 25s instead of waiting forever.
+      const r = await Promise.race([window.PDA_httpGet(url, {}), sleep(25 * SEC).then(() => ({ timedOut: true }))]);
+      if (r && r.timedOut) throw new Error("no answer (timed out)");
       if (r && r.status != null) {
         const status = +r.status;
         if (status < 200 || status >= 300) throw new Error("HTTP " + status);
@@ -1787,6 +1793,7 @@
             line: `😴 Inactive <b>${Math.floor(inact)}d</b> at ${esc(co.n || "")} (${co.stars}★)${e.dic < inact ? ` · hired ${e.dic}d ago` : ""}<br>Est. unbanked pay ~<b>${short(cash * 0.5)}–${short(cash * 1.5)}</b>${mLo ? ` · mug ~${short(mLo[0])}–${short(mHi[1])}` : ""}`,
             hidden: (f.okOnly && e.st && e.st !== "Okay") || (MUGGED[uid] && now() - MUGGED[uid] < 7 * DAY),
           });
+          stats(+uid).then(drawSoon); // fetch stats as soon as a worker is found
         }
         list.sort((a, b) => b.score - a.score);
         drawSoon();
