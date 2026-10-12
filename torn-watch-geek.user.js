@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Watch Geek
 // @namespace    https://github.com/SarcasticGeekJr/torn-watch-geek
-// @version      1.1.8
+// @version      1.1.10
 // @description  Watch players (online, hospital, jail, flight landing times, bazaar and Item Market listings) and find mug targets: rich sellers, sleeping workers in high-paying companies, and your own advanced search, all with estimated battle stats and win chance. Built for Torn PDA, works in Tampermonkey too.
 // @author       SarcasticGeekJr
 // @match        https://www.torn.com/*
@@ -48,7 +48,7 @@
 
   // ---------------------------------------------------------------- config
   const PDA_KEY = "###PDA-APIKEY###"; // Torn PDA replaces this with your key at runtime
-  const VERSION = "1.1.8"; // keep in sync with @version above
+  const VERSION = "1.1.10"; // keep in sync with @version above
   const UPDATE_URL = "https://raw.githubusercontent.com/SarcasticGeekJr/torn-watch-geek/main/torn-watch-geek.user.js";
   const TORN = "https://api.torn.com";
   const FFS = "https://ffscouter.com/api/v1/get-stats";
@@ -582,14 +582,31 @@
     return d;
   }
 
+  // Torn's company types (ids from Torn's job list). Used when the key can't read 'torn -> companies'.
+  const BUILTIN_CTYPES = {
+    1: "Hair Salon", 2: "Law Firm", 3: "Flower Shop", 4: "Car Dealership", 5: "Clothing Store", 6: "Gun Shop", 7: "Game Shop",
+    8: "Candle Shop", 9: "Toy Shop", 10: "Adult Novelties", 11: "Cyber Cafe", 12: "Grocery Store", 13: "Theater", 14: "Sweet Shop",
+    15: "Cruise Line", 16: "Television Network", 18: "Zoo", 19: "Firework Stand", 20: "Property Broker", 21: "Furniture Store",
+    22: "Gas Station", 23: "Music Store", 24: "Nightclub", 25: "Pub", 26: "Gents Strip Club", 27: "Restaurant", 28: "Oil Rig",
+    29: "Fitness Center", 30: "Mechanic Shop", 31: "Amusement Park", 32: "Lingerie Store", 33: "Meat Warehouse", 34: "Farm",
+    35: "Software Corporation", 36: "Ladies Strip Club", 37: "Private Security Firm", 38: "Mining Corporation", 39: "Detective Agency",
+    40: "Logistics Management",
+  };
+  if (!CTYPES) CTYPES = { t: 0, types: BUILTIN_CTYPES };
   async function companyTypes() {
-    if (CTYPES && now() - CTYPES.t < 7 * DAY) return CTYPES.types;
-    const d = await torn(`/torn/?selections=companies`, DAY, { hi: true });
-    const types = {};
-    for (const [id, c] of Object.entries(d.companies || {})) types[id] = c.name;
-    CTYPES = { t: now(), types };
-    store.set("ctypes", CTYPES);
-    return types;
+    if (CTYPES && CTYPES.t && now() - CTYPES.t < 7 * DAY) return CTYPES.types;
+    try {
+      const d = await torn(`/torn/?selections=companies`, DAY, { hi: true });
+      const types = {};
+      for (const [id, c] of Object.entries(d.companies || {})) types[id] = c.name;
+      if (!Object.keys(types).length) throw new Error("empty");
+      CTYPES = { t: now(), types };
+      store.set("ctypes", CTYPES);
+    } catch {
+      // Some keys aren't allowed to read this. The built-in list works just as well.
+      CTYPES = { t: now() - 6 * DAY, types: BUILTIN_CTYPES }; // try Torn again in a day
+    }
+    return CTYPES.types;
   }
   const typeName = (id) => (CTYPES && CTYPES.types[id]) || (id ? "Type " + id : "");
   const isClothing = (ct) => /clothing/i.test(typeName(ct));
@@ -1527,7 +1544,7 @@
       box.innerHTML = "";
       return;
     }
-    const shown = rs.filter((r) => !r.hidden);
+    const shown = rs.filter((r) => !r.hidden && !r.pending);
     box.innerHTML = shown.length ? shown.slice(0, 80).map(resultCard).join("") : `<p class="muted hint">${S.hunt === "sleep" ? "No sleeping workers found. See the report above." : "No players match. Try looser filters or tap 'Find more players'."}</p>`;
   }
   const saveResults = (() => {
@@ -1917,32 +1934,42 @@
   }
   const matchCheap = (id, p, f) => !cheapFail(id, p, f);
   // Returns true (pass), false (fail) or null (still waiting for data).
-  function matchSlow(id, p, f) {
+  // Returns true (pass), false (fail) or null (still waiting for data).
+  // Anything we already know fails wins over anything we're still waiting for.
+  function statFail(id, f) {
+    const s = ST[id];
+    if (!s) return null;
+    const bs = s.spy ? s.spy.total : s.bs;
+    if (numOr(f.maxStats) != null && bs != null && bs > +f.maxStats) return true;
+    if (f.win && WIN_ORDER[winOf(id).k] > WIN_ORDER[f.win]) return true;
+    return false;
+  }
+  function matchSlow(id, p, f, why) {
     const L = numOr;
+    const no = (r) => {
+      if (why) why[r] = (why[r] || 0) + 1;
+      return false;
+    };
+    let wait = false;
+    if (f.maxStats || f.win) {
+      const sf = statFail(id, f);
+      if (sf === true) return no("battle stats / win chance");
+      if (sf === null) wait = true;
+    }
     if (needsProfile(f) && !p.pt) return null;
-    if (f.okOnly && p.st && p.st !== "Okay") return false;
-    if (L(f.ageMin) != null && (p.age == null || p.age < +f.ageMin)) return false;
-    if (L(f.ageMax) != null && (p.age == null || p.age > +f.ageMax)) return false;
-    if (f.gender && p.g !== f.gender) return false;
-    if (f.property && !(p.pr || "").toLowerCase().includes(f.property.toLowerCase())) return false;
-    if (f.ctype && +p.ct !== +f.ctype) return false;
+    if (f.okOnly && p.st && p.st !== "Okay") return no("not Okay right now");
+    if (L(f.ageMin) != null && (p.age == null || p.age < +f.ageMin)) return no("days old");
+    if (L(f.ageMax) != null && (p.age == null || p.age > +f.ageMax)) return no("days old");
+    if (f.gender && p.g !== f.gender) return no("gender");
+    if (f.property && !(p.pr || "").toLowerCase().includes(f.property.toLowerCase())) return no("property");
+    if (f.ctype && +p.ct !== +f.ctype) return no("company type");
     const co = p.co ? CO[p.co] : null;
     if ((L(f.starsMin) != null || L(f.starsMax) != null || f.noClothing) && p.co && !co) return null;
     const stars = co ? co.stars : null;
-    if (L(f.starsMin) != null && (stars == null || stars < +f.starsMin)) return false;
-    if (L(f.starsMax) != null && stars != null && stars > +f.starsMax) return false;
-    if (f.noClothing && isClothing(p.ct) && stars >= 7) return false;
-    if (f.maxStats || f.win) {
-      const s = ST[id];
-      if (!s) return null;
-      const bs = s.spy ? s.spy.total : s.bs;
-      if (L(f.maxStats) != null && bs != null && bs > +f.maxStats) return false;
-      if (f.win) {
-        const w = winOf(id);
-        if (WIN_ORDER[w.k] > WIN_ORDER[f.win]) return false;
-      }
-    }
-    return true;
+    if (L(f.starsMin) != null && (stars == null || stars < +f.starsMin)) return no("company stars");
+    if (L(f.starsMax) != null && stars != null && stars > +f.starsMax) return no("company stars");
+    if (f.noClothing && isClothing(p.ct) && stars >= 7) return no("7★ clothing store");
+    return wait ? null : true;
   }
   function targetScore(id, p) {
     // Higher = better target: inactive, weak, rich, recently sold.
@@ -1952,8 +1979,9 @@
     const rich = Math.log10(1 + (p.nw || 0) / 1e6) * 10 + Math.log10(1 + salesIn(id, 48) / 1e5) * 10;
     return inact + winPts + rich;
   }
-  function searchGo() {
+  async function searchGo() {
     const f = S.search;
+    const runId = (view.runId = (view.runId || 0) + 1);
     const why = {};
     const all = Object.entries(DB).filter(([id, p]) => {
       const r = cheapFail(+id, p, f);
@@ -1972,7 +2000,27 @@
       drawResults();
       return;
     }
-    const list = all.map(([id, p]) => ({ id: +id, score: targetScore(+id, p) }));
+    let list = all.map(([id, p]) => ({ id: +id, score: targetScore(+id, p) }));
+    // Stats come from FF Scouter, 100 players per request, without using Torn API calls.
+    // Get them first, so players who are too strong never take a place in the list.
+    if (f.win || f.maxStats || f.sort === "stats") {
+      list.sort((a, b) => b.score - a.score);
+      const pool = list.slice(0, 500);
+      view.results = { mode: "search", list: [] };
+      view.msg = `${all.length.toLocaleString()} match the quick filters. Getting battle stats for ${pool.length}…`;
+      drawResults();
+      await Promise.all(pool.map((r) => stats(r.id)));
+      if (view.runId !== runId) return;
+      const before = pool.length;
+      list = pool.filter((r) => statFail(r.id, f) !== true && !(f.win && !ST[r.id]));
+      list.forEach((r) => (r.score = targetScore(r.id, DB[r.id] || {})));
+      if (!list.length) {
+        view.results = { mode: "search", list: [] };
+        view.msg = `${all.length.toLocaleString()} match the quick filters, but none of the ${before} checked pass the battle stats / win chance filter${ffErr ? ` (${esc(ffErr)})` : ""}. Try 'Find more players' or a looser win chance.`;
+        drawResults();
+        return;
+      }
+    }
     const sorters = {
       score: (a, b) => b.score - a.score,
       inactive: (a, b) => (DB[a.id].la || 9e9) - (DB[b.id].la || 9e9),
@@ -2013,7 +2061,17 @@
       recheck,
       label: `${all.length.toLocaleString()} match. Checking`,
       sort: (l) => l.sort(sorters[f.sort] || sorters.score),
-      done: (l) => `${l.filter((r) => !r.hidden).length} of the top ${l.length} pass every filter (${all.length.toLocaleString()} matched the quick filters).`,
+      done: (l) => {
+        const ok = l.filter((r) => !r.hidden && !r.pending).length;
+        const w = {};
+        l.forEach((r) => matchCheap(r.id, DB[r.id] || {}, f) && matchSlow(r.id, DB[r.id] || {}, f, w));
+        const ruled = Object.entries(w)
+          .sort((a, b) => b[1] - a[1])
+          .map(([k, n]) => `<b>${esc(k)}</b> ${n}`)
+          .join(" · ");
+        const tip = f.ctype ? " Company type only matches players whose job is in that company type; few saved players qualify, so tap 'Find more players' a few times." : "";
+        return `${ok} of the top ${l.length} pass every filter (${all.length.toLocaleString()} matched the quick filters).${ruled ? " Ruled out by: " + ruled + "." : ""}${!ok ? tip : ""}`;
+      },
     });
   }
   function statOf(id) {
