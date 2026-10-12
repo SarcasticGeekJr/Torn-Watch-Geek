@@ -31,7 +31,10 @@ Updates: Torn PDA checks when the app starts (or Settings → Userscripts → �
 - Hospital and jail show the time left.
 - **Flights:**
   - Take-off seen: `✈ Japan · lands between 14:10 and 15:50`. Tickets that would already have landed are ruled out as time passes.
-  - Ticket known: `✈ Japan · WLT · lands ~15:23 (in 42m)`. The ticket comes from the plane type Torn shows for the flight, or from what it learned on a past flight.
+  - Ticket known: `✈ Japan · WLT · lands between 15:19 and 15:27 (most likely ~15:23)`. The ticket comes from the plane type Torn shows for the flight, or from what it learned on a past flight. It's a range because take-off is only known to within one check, and real flights vary up to about 3% from the table.
+  - **Learns real flight times:** every landing it (or the background tracker) times well, it saves how long that route + ticket really took. After 2 real flights the range is based on them and narrower: `(based on 3 real flights)`.
+  - **⏳ Landing window starts:** an alert at the start of the range, not the middle (⚙ → Alerts). In Torn PDA it also sets a phone notification for that time, so it reaches you even if Torn PDA is closed.
+  - **Fast check before landing:** from 5 minutes before the range starts until it ends, that player is checked every 10 seconds (⚙ → API use; on by default) instead of every minute, so you see the landing within seconds. It slows down by itself so it never goes over your cap.
   - Take-off not seen (started watching mid-flight): `✈ Switzerland · Landing time unknown` with `Already flying when tracking started. Latest possible landing: 8:11 pm. Tap to enter take-off time.`
   - Take-off not seen, but they were seen on the ground earlier (by the script, or a landing logged by the background tracker): `✈ Torn → Switzerland · lands between 9:34 pm and 9:42 pm` with `Took off between 7:38 pm and 7:46 pm`.
   - If you know when they took off, enter it on their page ("took off at…" or "… minutes ago") and the landing time is worked out from that.
@@ -107,7 +110,8 @@ A small free script in **your own Google account** that checks your watched play
 The watched players list is sent to the tracker automatically from Torn Watch Geek.
 
 ## API use
-- All Torn API calls go through one queue, capped at **30 a minute** by default (change it in ⚙). Torn allows 100 a minute shared by all your tools.
+- All Torn API calls go through one queue, capped at **30 a minute** by default (change it in ⚙). Torn allows 100 a minute shared by all your tools. The Watch tab and ⚙ → API use show the calls made in the last minute, live.
+- Torn keeps API answers in a cache for up to 30 seconds (repeat calls in that time are free but return the same data). Fast checks skip that cache, so each one is a real call.
 - Watched players: 1 call per player per check (default every 60s) plus 1 per bazaar check (every 5 min).
 - Live sales: 25 calls a minute while it's running (pause it any time). Search and Sleeping workers only use calls when you tap a button.
 - It only runs while Torn is open. It can't alert you when the app is closed.

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Watch Geek
 // @namespace    https://github.com/SarcasticGeekJr/torn-watch-geek
-// @version      1.6.0
+// @version      1.7.0
 // @description  Watch players (online, hospital, jail, flight landing times, bazaar and Item Market listings) and find mug targets: rich sellers, sleeping workers in high-paying companies, and your own advanced search, all with estimated battle stats and win chance. Built for Torn PDA, works in Tampermonkey too.
 // @author       SarcasticGeekJr
 // @match        https://www.torn.com/*
@@ -50,7 +50,7 @@
 
   // ---------------------------------------------------------------- config
   const PDA_KEY = "###PDA-APIKEY###"; // Torn PDA replaces this with your key at runtime
-  const VERSION = "1.6.0"; // keep in sync with @version above
+  const VERSION = "1.7.0"; // keep in sync with @version above
   const UPDATE_URL = "https://raw.githubusercontent.com/SarcasticGeekJr/torn-watch-geek/main/torn-watch-geek.user.js";
   const TORN = "https://api.torn.com";
   const FFS = "https://ffscouter.com/api/v1/get-stats";
@@ -88,6 +88,8 @@
     tsKey: "", // Torn Stats key (optional)
     apiPerMin: 30, // max Torn API calls per minute this script makes
     pollSec: 60, // how often each watched player is checked
+    fastOn: true, // check a player every few seconds when their landing window is about to start
+    fastSec: 10,
     bazaarMin: 5, // how often a watched player's bazaar is checked
     myTotal: 0, // your total battle stats (optional, makes win chance better)
     mugMerits: 0, // 0..10
@@ -98,7 +100,7 @@
     salesScan: true, // watch TornW3B bazaar listings for sales
     salesItems: 20, // how many popular items to scan
     salesScanMin: 10,
-    alerts: { mug: true, online: true, offline: false, hosp: true, jail: true, travel: true, land: true, bazaar: true, market: true },
+    alerts: { mug: true, online: true, offline: false, hosp: true, jail: true, travel: true, soon: true, land: true, bazaar: true, market: true },
     alertPopup: true,
     alertVibrate: true,
     fab: null,
@@ -268,6 +270,13 @@
   const apiQ = { hi: [], lo: [], sent: [], running: false };
   let apiUsedTotal = 0,
     lastHiAt = 0;
+  const apiLog = []; // times of real calls, for "calls in the last minute"
+  const apiCap = () => Math.max(5, Math.min(100, +S.apiPerMin || 30));
+  function apiLastMin() {
+    const cut = now() - MIN;
+    while (apiLog.length && apiLog[0] < cut) apiLog.shift();
+    return apiLog.length;
+  }
   function apiSlot(hi) {
     if (hi) lastHiAt = now();
     return new Promise((res) => {
@@ -282,7 +291,7 @@
       while (apiQ.hi.length || apiQ.lo.length) {
         const cut = now() - MIN;
         while (apiQ.sent.length && apiQ.sent[0] < cut) apiQ.sent.shift();
-        const cap = Math.max(5, Math.min(100, +S.apiPerMin || 30));
+        const cap = apiCap();
         if (apiQ.sent.length >= cap) {
           await sleep(apiQ.sent[0] - cut + 50);
           continue;
@@ -290,6 +299,7 @@
         const next = apiQ.hi.shift() || apiQ.lo.shift();
         apiQ.sent.push(now());
         apiUsedTotal++;
+        apiLog.push(now());
         next();
         await sleep(120);
       }
@@ -309,7 +319,9 @@
     if (!key) throw new Error("no API key (add one in ⚙️ Settings)");
     if (deadKey && deadKey === key) throw new Error("API key stopped working: " + deadKeyMsg + ". Check it in ⚙️ Settings.");
     const sep = path.includes("?") ? "&" : "?";
-    const url = `${TORN}${path}${sep}key=${encodeURIComponent(key)}&comment=TornWatchGeek`;
+    // fresh: skip Torn's own cache (up to 30 s) by making the request unique. Costs a call every time.
+    const fresh = opts.fresh ? `timestamp=${Math.floor(now() / 1000)}&` : "";
+    const url = `${TORN}${path}${sep}${fresh}key=${encodeURIComponent(key)}&comment=TornWatchGeek`;
     const getter = async (u) => {
       await apiSlot(opts.hi);
       return httpGet(u);
@@ -414,6 +426,27 @@
   const tripKey = (t) => (t ? t.dir + ":" + t.country : "");
   const flightMs = (country, ticket) => (FLIGHT[country] ? FLIGHT[country][ticket] * MIN : 0);
 
+  // Real flight times seen by this script or the background tracker, per route + ticket:
+  // "country|ticket" -> [[shortest, longest, landed at], ...] in ms. Only flights timed to within 4 minutes.
+  const DURS = store.get("durs", {});
+  function learnDur(country, k, minD, maxD, landedAt) {
+    if (!(maxD - minD <= 4 * MIN) || minD <= 0) return;
+    const key = country + "|" + k;
+    const list = DURS[key] || [];
+    // The script and the tracker can both see the same landing: count it once.
+    if (list.some((x) => Math.abs(x[2] - landedAt) < 5 * MIN)) return;
+    DURS[key] = [...list, [Math.round(minD), Math.round(maxD), Math.round(landedAt)]].slice(-15);
+    store.set("durs", DURS);
+  }
+  // How long a flight takes on this ticket: from 2+ real flights if we have them, else the table +-3%.
+  function flightBand(country, k) {
+    const f = flightMs(country, k);
+    const mids = (DURS[country + "|" + k] || []).map((x) => (x[0] + x[1]) / 2).sort((a, b) => a - b);
+    if (mids.length >= 2)
+      return { lo: mids[0] - MIN, hi: mids[mids.length - 1] + MIN, mid: mids[Math.floor(mids.length / 2)], n: mids.length };
+    return { lo: f * 0.97, hi: f * 1.03 + MIN, mid: f, n: 0 };
+  }
+
   // Which tickets still fit, and when each would land.
   // Plane type from Torn's player status (the plane picture on their profile while flying).
   // Learned from real flights first; until then a guess from the name.
@@ -445,12 +478,12 @@
     const known = !!t.depLo; // seen (or told) when they took off
     const opts = [];
     for (const k of tickets) {
-      const f = flightMs(t.country, k);
-      const lo = (t.depLo || t.depHi) + f * 0.97;
-      const hi = t.depHi + f * 1.03 + MIN;
+      const b = flightBand(t.country, k);
+      const lo = (t.depLo || t.depHi) + b.lo;
+      const hi = t.depHi + b.hi;
       // A ticket is ruled out once its latest landing has passed while they're still flying.
       if (known && hi < n) continue;
-      opts.push({ k, lo, hi, mid: (known ? (t.depLo + t.depHi) / 2 : t.depHi) + f });
+      opts.push({ k, lo, hi, mid: (known ? (t.depLo + t.depHi) / 2 : t.depHi) + b.mid, n: b.n });
     }
     // Flying longer than that ticket allows: they used a different ticket this time.
     if (!opts.length) return tk ? tripEstimate(w, true) : { unknown: true };
@@ -471,15 +504,27 @@
     if (!e.known)
       return `✈️ ${esc(dest)}${tk} · Landing time unknown<br><span class="muted tl2">Already flying when tracking started. Latest possible landing: ${clock(e.hi)}. ${where === "page" ? "Enter the take-off time below if you know it." : "Tap to enter take-off time."}</span>`;
     const tr = w.trip || {};
+    const based = e.single && e.opts[0].n ? `based on ${e.opts[0].n} real flights` : "";
     if (tr.bound && !e.manual) {
       // Take-off only known to be between two times, so the landing is a range too.
-      return `✈️ ${esc(dest)}${tk} · lands between ${clock(Math.max(e.lo, now()))} and ${clock(e.hi)}<br><span class="muted tl2">Took off between ${clock(tr.depLo)} and ${clock(tr.depHi)} (seen on the ground at ${clock(tr.depLo)}).</span>`;
+      return `✈️ ${esc(dest)}${tk} · ${landRange(e)}<br><span class="muted tl2">Took off between ${clock(tr.depLo)} and ${clock(tr.depHi)} (seen on the ground at ${clock(tr.depLo)}).${based ? " Flight time " + based + "." : ""}</span>`;
     }
     if (e.single) {
       const o = e.opts[0];
-      return `✈️ ${esc(dest)}${tk} · lands ~${clock(o.mid)} <small class="muted">(in ${dur(o.mid - now())}${src ? ", " + src : ""})</small>`;
+      const note = [o.mid > now() ? "in " + dur(o.mid - now()) : "", based, src].filter(Boolean).join(", ");
+      return `✈️ ${esc(dest)}${tk} · ${landRange(e)}${note ? ` <small class="muted">(${note})</small>` : ""}`;
     }
     return `✈️ ${esc(dest)} · lands between ${clock(Math.max(e.lo, now()))} and ${clock(e.hi)}${src ? ` <small class="muted">(${src})</small>` : ""}`;
+  }
+  // "lands between 11:39 and 11:47 (most likely ~11:43)". Take-off is only known to within one check,
+  // and real flights vary a few % from the table, so one time would claim more than is known.
+  function landRange(e) {
+    const t = now(),
+      lo = Math.max(e.lo, t);
+    if (e.hi - lo <= MIN) return `lands ~${clock(e.hi)}`;
+    const mid = e.single ? e.opts[0].mid : 0;
+    const likely = !mid ? "" : mid > t + 30 * SEC ? ` (most likely ~${clock(mid)})` : " (any minute now)";
+    return `lands between ${clock(lo)} and ${clock(e.hi)}${likely}`;
   }
   // Ask Torn's v2 profile for the plane type when v1 didn't include it (1 call per flight at most).
   async function fetchPlane(id) {
@@ -496,7 +541,7 @@
   }
 
   // A flight took between minD and maxD. If that fits exactly one ticket, remember it (and the plane type link).
-  function learnTicket(w, country, plane, minD, maxD) {
+  function learnTicket(w, country, plane, minD, maxD, landedAt) {
     if (!FLIGHT[country] || !(maxD > 0)) return "";
     const fits = [0, 1, 2, 3].filter((k) => {
       const f = flightMs(country, k),
@@ -505,6 +550,7 @@
     });
     if (fits.length !== 1) return "";
     w.ticket = fits[0];
+    if (landedAt !== 0) learnDur(country, fits[0], minD, maxD, landedAt || now());
     if (plane) {
       PLANES[plane] = PLANES[plane] || [0, 0, 0, 0];
       PLANES[plane][fits[0]]++;
@@ -554,13 +600,14 @@
         w.trip = { dir: cur.trip.dir, country: cur.trip.country, depLo: fresh && !prev.trip ? prevSeen : 0, depHi: t, plane: planeOf(p) };
         bgTripTimes(id, w.trip);
         const e = tripEstimate(w);
-        event(id, "travel", (cur.trip.dir === "back" ? `flying back to Torn${cur.trip.country ? " from " + cur.trip.country : ""}` : `flying to ${cur.trip.country}`) + (e && !e.unknown && e.known ? ` · lands ${clock(e.lo)}–${clock(e.hi)}` : " (already in the air when tracking started)"));
+        event(id, "travel", (cur.trip.dir === "back" ? `flying back to Torn${cur.trip.country ? " from " + cur.trip.country : ""}` : `flying to ${cur.trip.country}`) + (e && !e.unknown && e.known ? " · " + landRange(e) : " (already in the air when tracking started)"));
       }
       if (prev.trip && !cur.trip) {
         const trip = w.trip;
         let learned = "";
-        if (trip && trip.depLo && fresh) learned = learnTicket(w, trip.country, trip.plane, prevSeen - trip.depHi, t - trip.depLo);
+        if (trip && trip.depLo && fresh) learned = learnTicket(w, trip.country, trip.plane, prevSeen - trip.depHi, t - trip.depLo, trip.manual ? 0 : t);
         const where = prev.trip.dir === "back" ? "Torn" : prev.trip.country;
+        cancelSoon(id, trip);
         event(id, "land", `landed in ${where}${learned}${late}`);
         w.trip = null;
       }
@@ -606,7 +653,7 @@
     updateBadge();
     if (isOpen() && (view.name === "watch" || view.name === "feed" || (view.name === "player" && view.id === +pid))) renderSoon();
   }
-  const ICON = { online: "🟢", offline: "⚪", hosp: "🏥", jail: "🔒", travel: "✈️", land: "🛬", bazaar: "🛒", market: "🏷", sold: "💰", mug: "🔥" };
+  const ICON = { online: "🟢", offline: "⚪", hosp: "🏥", jail: "🔒", travel: "✈️", soon: "⏳", land: "🛬", bazaar: "🛒", market: "🏷", sold: "💰", mug: "🔥" };
 
   let alertQueue = [];
   function showAlert(ev) {
@@ -851,16 +898,78 @@
   }
 
   // ---------------------------------------------------------------- watching (background)
+  // Fast checks: a player whose landing window starts within 5 minutes (until it ends) is checked
+  // every S.fastSec seconds instead of every S.pollSec. Torn caches API answers for up to 30 seconds,
+  // so fast checks add a "timestamp" to get fresh data (each one counts against the limit).
+  const FAST_AHEAD = 5 * MIN;
+  function fastWindow(w) {
+    if (!S.fastOn || !w.trip) return false;
+    const e = tripEstimate(w);
+    if (!e || e.unknown || !e.known || !e.single) return false;
+    const t = now();
+    return t >= e.lo - FAST_AHEAD && t <= e.hi + MIN;
+  }
+  // Seconds between fast checks, stretched so all of them fit in what's left under the cap.
+  function fastEvery(nFast) {
+    const cap = apiCap();
+    const slow = Object.keys(W).length - nFast;
+    const other = slow * (60 / Math.max(30, +S.pollSec || 60)) + Object.keys(W).length / Math.max(2, +S.bazaarMin || 5);
+    const room = Math.max(1, cap - other - 5); // keep 5 a minute for taps and the rest of the script
+    return Math.min(Math.max(30, +S.pollSec || 60), Math.max(5, +S.fastSec || 10, Math.ceil((60 * nFast) / room)));
+  }
+  // "Landing window starts" alert (in the script, plus a Torn PDA phone notification set in advance).
+  function landSoon(id, w) {
+    const tr = w.trip;
+    const e = tr && tripEstimate(w);
+    if (!e || e.unknown || !e.known || !e.single) return;
+    const t = now();
+    if (!tr.soonAt && t >= e.lo && t <= e.hi) {
+      tr.soonAt = t;
+      event(id, "soon", "landing window started: " + landRange(e));
+    }
+    if (!S.alerts.soon || tr.soonAt || !window.flutter_inappwebview || Math.abs((tr.notifAt || 0) - e.lo) < MIN || e.lo < t + 60 * SEC) return;
+    tr.notifAt = e.lo;
+    saveSoon("watch");
+    const dest = tr.dir === "back" ? "Torn" : tr.country;
+    window.flutter_inappwebview
+      .callHandler("scheduleNotification", {
+        title: `🛬 ${w.name || "#" + id} may land in ${dest} now`,
+        subtitle: `Lands between ${clock(e.lo)} and ${clock(e.hi)}${e.opts[0].mid ? ", most likely ~" + clock(e.opts[0].mid) : ""}. Torn Watch Geek`,
+        id: 4100 + (+id % 800),
+        timestamp: Math.round(e.lo),
+        overwriteID: true,
+        launchNativeToast: false,
+        urlCallback: profileUrl(id),
+      })
+      .catch(() => {});
+  }
+  // They landed before the phone reminder went off: drop it.
+  function cancelSoon(id, tr) {
+    if (!tr || !tr.notifAt || tr.notifAt < now() || !window.flutter_inappwebview) return;
+    window.flutter_inappwebview.callHandler("cancelNotification", { id: 4100 + (+id % 800) }).catch(() => {});
+  }
+
   let pollBusy = false;
   async function pollWatch() {
     if (pollBusy || document.hidden || !apiKey() || deadKey === apiKey()) return;
     pollBusy = true;
     try {
       const t = now();
-      const due = Object.keys(W).filter((id) => !W[id].nextAt || W[id].nextAt <= t);
+      const ids = Object.keys(W);
+      ids.forEach((id) => landSoon(id, W[id]));
+      const fast = ids.filter((id) => fastWindow(W[id]));
+      const fastSec = fast.length ? fastEvery(fast.length) : 0;
+      for (const id of fast) {
+        // Coming into the fast window: check soon instead of waiting out the slow interval.
+        if (W[id].nextAt > t + fastSec * SEC) W[id].nextAt = t;
+      }
+      const due = ids.filter((id) => !W[id].nextAt || W[id].nextAt <= t);
       for (const id of due) {
-        W[id].nextAt = t + Math.max(30, +S.pollSec || 60) * SEC;
-        getProfile(id, { ttl: 20 * SEC })
+        const isFast = fast.includes(id);
+        // Never let fast checks pile up in the queue.
+        if (isFast && apiQueued() > 2) continue;
+        W[id].nextAt = t + (isFast ? fastSec : Math.max(30, +S.pollSec || 60)) * SEC;
+        getProfile(id, isFast ? { ttl: 0, force: true, fresh: true } : { ttl: 20 * SEC })
           .then(() => {
             W[id] && (W[id].err = "");
             if (W[id] && W[id].trip && W[id].trip.plane === undefined) fetchPlane(id);
@@ -1276,7 +1385,7 @@
       BG.trips[e.id] = { key: x.dir + ":" + x.country, depLo: x.depLo || 0, depHi: x.depHi, plane: x.plane || "" };
       if (w && w.trip) bgTripTimes(e.id, w.trip);
     }
-    if (e.kind === "land" && w && x.depLo && x.arrLo) learnTicket(w, x.country, x.plane, x.arrLo - x.depHi, x.arrHi - x.depLo);
+    if (e.kind === "land" && w && x.depLo && x.arrLo) learnTicket(w, x.country, x.plane, x.arrLo - x.depHi, x.arrHi - x.depLo, x.arrHi || e.t);
     if (e.kind === "land" && (x.arrHi || e.t)) {
       BG.ground = BG.ground || {};
       BG.ground[e.id] = Math.max(BG.ground[e.id] || 0, x.arrHi || e.t);
@@ -1550,8 +1659,20 @@
       ${ctx && !W[ctx] && ctx !== myId ? `<button class="ctx" data-act="watchAdd" data-id="${ctx}">⭐ Watch this player <small>(#${ctx})</small></button>` : ""}
       <div class="addrow"><input class="addid" inputmode="numeric" placeholder="Player ID to watch"><button class="btn" data-act="watchAddInput">Add</button></div>
       <div class="list">${ids.length ? ids.map(watchRow).join("") : `<p class="muted hint">No one yet. Open a player's profile and tap ⭐ Watch, or type their ID above.</p>`}</div>
-      ${ids.length ? `<p class="muted small foot">Checks each player every ${S.pollSec}s and their bazaar every ${S.bazaarMin} min while Torn is open. API calls this session: ${apiUsedTotal}${apiQueued() ? ` · ${apiQueued()} waiting` : ""}.</p>` : ""}`;
+      ${ids.length ? `<p class="muted small foot">Checks each player every ${S.pollSec}s${S.fastOn ? ` (every ${Math.max(5, +S.fastSec || 10)}s from 5 minutes before their landing window)` : ""} and their bazaar every ${S.bazaarMin} min while Torn is open.<br><span class="apimeter">${apiMeter()}</span></p>` : ""}`;
   }
+  // Live API use, refreshed every 2 seconds while shown.
+  function apiMeter() {
+    const fast = Object.keys(W).filter((id) => fastWindow(W[id]));
+    return (
+      `API: <b>${apiLastMin()}</b> calls in the last minute (your cap ${apiCap()}) · ${apiUsedTotal} this session${apiQueued() ? ` · ${apiQueued()} waiting` : ""}.` +
+      (fast.length ? ` Fast checks now: ${fast.map((id) => esc(W[id].name || "#" + id)).join(", ")} (every ${fastEvery(fast.length)}s).` : "")
+    );
+  }
+  setInterval(() => {
+    if (!isOpen()) return;
+    $$(".apimeter").forEach((el) => (el.innerHTML = apiMeter()));
+  }, 2 * SEC);
   function watchRow(id) {
     const w = W[id];
     const b = statusBits(w.s);
@@ -2444,7 +2565,11 @@
         <h3>API use</h3>
         ${numIn("apiPerMin", "Max Torn API calls per minute", 'min="5" max="100"')}
         <p class="muted small">Torn allows 100 a minute shared by all your tools. Keep room for Torn PDA and other scripts.</p>
+        <div class="small muted apimeter">${apiMeter()}</div>
         ${numIn("pollSec", "Check watched players every (seconds)", 'min="30"')}
+        <label class="tog"><input type="checkbox" data-s="fastOn" ${S.fastOn ? "checked" : ""}> Fast check before landing</label>
+        ${numIn("fastSec", "&nbsp;&nbsp;Fast check every (seconds)", 'min="5" max="30"')}
+        <p class="muted small">From 5 minutes before a watched player's landing window until it ends, they're checked every few seconds so you see the landing within seconds. Each fast check is a real API call (Torn's 30-second cache is skipped), and it slows down by itself if it would go over your cap.</p>
         ${numIn("bazaarMin", "Check their bazaars every (minutes)", 'min="2"')}
 
         <h3>Alerts</h3>
@@ -2454,6 +2579,7 @@
         ${al("hosp", "Hospital in / out")}
         ${al("jail", "Jail in / out")}
         ${al("travel", "Took off")}
+        ${al("soon", "Landing window starts (before they land)")}
         ${al("land", "Landed")}
         ${al("bazaar", "Bazaar listed / sold")}
         ${al("market", "Item Market listed / sold")}
@@ -2938,7 +3064,7 @@
     updateBadge();
     loadMyStats();
     if (apiKey()) setTimeout(() => companyTypes().catch(() => {}), 5 * SEC);
-    setInterval(pollWatch, 5 * SEC);
+    setInterval(pollWatch, 2 * SEC);
     setTimeout(pollWatch, 1500);
     setInterval(() => scanSales(false), MIN);
     setInterval(liveTick, 500);
