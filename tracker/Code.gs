@@ -14,7 +14,7 @@
  * It is only sent to api.torn.com. Nothing is shared with anyone else.
  */
 
-const TRACKER_VERSION = "1.0.0";
+const TRACKER_VERSION = "1.0.1";
 const MAX_PLAYERS = 12; // Google's free daily limits allow about this many at one check per minute
 const KEEP_ROWS = 5000;
 const DEAD_KEY = [1, 2, 10, 13, 18]; // Torn: wrong, paused or disabled key - stop using it
@@ -148,13 +148,19 @@ function showLink() {
   const ui = SpreadsheetApp.getUi();
   if (!c.secret) return ui.alert("Run Torn Tracker > Setup first.");
   if (!url) return ui.alert("Deploy first: Deploy > New deployment > type: Web app, Execute as: Me, Who has access: Anyone > Deploy. Then come back here.");
-  const link = url + "?s=" + c.secret;
+  // Google sometimes hands back the test link (ending in /dev), which only works when signed in.
+  const isExec = /\/exec$/.test(url);
+  const link = isExec ? url + "?s=" + c.secret : "";
   const html = HtmlService.createHtmlOutput(
-    '<div style="font-family:Arial;font-size:14px">Copy this link into Torn Watch Geek: Settings &gt; Background tracker link.<br><small>Keep it private: it can read your tracker log.</small>' +
-      '<textarea style="width:100%;height:90px;margin-top:8px" onclick="this.select()">' + link + "</textarea>" +
+    '<div style="font-family:Arial;font-size:14px">' +
+      (isExec
+        ? 'Copy this link into Torn Watch Geek: Settings &gt; Background tracker link.<br><small>Keep it private: it can read your tracker log.</small><textarea style="width:100%;height:90px;margin-top:8px" onclick="this.select()">' + link + "</textarea>"
+        : "Google gave the test link, which won't work from Torn PDA. Do this instead:<br>1. Deploy &gt; Manage deployments &gt; copy the Web app URL (it ends in <b>/exec</b>).<br>2. Add this to the end of it:" +
+          '<textarea style="width:100%;height:40px;margin-top:8px" onclick="this.select()">?s=' + c.secret + "</textarea>3. Paste the whole thing into Torn Watch Geek: Settings &gt; Background tracker link.") +
+      "<p><small>Test: open the link in a browser. It should show {\"ok\":true,...}. A Google sign-in page means the deployment isn't set to Who has access: Anyone.</small></p>" +
       (c.topic ? "<p>ntfy topic for phone alerts: <b>" + c.topic + "</b></p>" : "") +
       "</div>"
-  ).setWidth(420).setHeight(240);
+  ).setWidth(440).setHeight(320);
   ui.showModalDialog(html, "Your tracker link");
 }
 

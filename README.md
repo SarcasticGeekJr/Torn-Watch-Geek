@@ -98,6 +98,8 @@ A small free script in **your own Google account** that checks your watched play
 6. In the Setup panel: paste your API key, keep or change the ntfy topic, tick the alerts you want, tap **Save and start tracking**.
 7. In Apps Script: **Deploy → New deployment** → gear ⚙ → **Web app**. Execute as: **Me**. Who has access: **Anyone**. Tap **Deploy** (allow again if asked).
 8. Back in the sheet: **🛰 Torn Tracker → Show my link**. Copy the link.
+   - The link must end in **/exec?s=…**. If it ends in **/dev**, that's Google's test link and won't work from Torn PDA: use **Deploy → Manage deployments → Web app URL** (ends in /exec) and add the `?s=…` part.
+   - Test it by opening the link in a browser: it should show `{"ok":true,…}`.
 9. In Torn Watch Geek: **⚙ Settings → Background tracker link** → paste → **Check tracker**. It should say ✅ Connected.
 10. Phone alerts (optional): install **ntfy** from the app store, tap **+**, and subscribe to the topic name shown in Setup.
 

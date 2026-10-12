@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Watch Geek
 // @namespace    https://github.com/SarcasticGeekJr/torn-watch-geek
-// @version      1.5.0
+// @version      1.5.1
 // @description  Watch players (online, hospital, jail, flight landing times, bazaar and Item Market listings) and find mug targets: rich sellers, sleeping workers in high-paying companies, and your own advanced search, all with estimated battle stats and win chance. Built for Torn PDA, works in Tampermonkey too.
 // @author       SarcasticGeekJr
 // @match        https://www.torn.com/*
@@ -50,7 +50,7 @@
 
   // ---------------------------------------------------------------- config
   const PDA_KEY = "###PDA-APIKEY###"; // Torn PDA replaces this with your key at runtime
-  const VERSION = "1.5.0"; // keep in sync with @version above
+  const VERSION = "1.5.1"; // keep in sync with @version above
   const UPDATE_URL = "https://raw.githubusercontent.com/SarcasticGeekJr/torn-watch-geek/main/torn-watch-geek.user.js";
   const TORN = "https://api.torn.com";
   const FFS = "https://ffscouter.com/api/v1/get-stats";
@@ -2692,7 +2692,12 @@
             : `✅ Connected (tracker v${d.version}). ${d.running ? "Checking every minute" : "Not running: open the sheet and run Setup"} · last check ${d.lastTick ? ago(d.lastTick) : "not yet"} · tracks up to ${d.max} players.`;
         } catch (er) {
           out.className = "bgout small r";
-          out.textContent = "❌ Couldn't reach the tracker: " + er.message + ". Check the link and that the deployment allows Anyone.";
+          const dev = /\/dev(\?|$)/.test(S.bgUrl.trim());
+          out.textContent = dev
+            ? "❌ This is Google's test link (it ends in /dev) and only works when signed in. In Apps Script: Deploy > Manage deployments > copy the Web app URL ending in /exec, add ?s= and your secret, and paste that."
+            : /404/.test(er.message)
+              ? "❌ Google says the link doesn't exist (404). Use the Web app URL from Deploy > Manage deployments (it ends in /exec) plus ?s= and your secret. If you deployed again, the link may have changed."
+              : "❌ Couldn't reach the tracker: " + er.message + ". Check the link, and that the deployment's Who has access is Anyone.";
         }
         break;
       }
