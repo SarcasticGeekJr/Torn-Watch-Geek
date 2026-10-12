@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Watch Geek
 // @namespace    https://github.com/SarcasticGeekJr/torn-watch-geek
-// @version      1.1.3
+// @version      1.1.5
 // @description  Watch players (online, hospital, jail, flight landing times, bazaar and Item Market listings) and find mug targets: rich sellers, sleeping workers in high-paying companies, and your own advanced search, all with estimated battle stats and win chance. Built for Torn PDA, works in Tampermonkey too.
 // @author       SarcasticGeekJr
 // @match        https://www.torn.com/*
@@ -48,7 +48,7 @@
 
   // ---------------------------------------------------------------- config
   const PDA_KEY = "###PDA-APIKEY###"; // Torn PDA replaces this with your key at runtime
-  const VERSION = "1.1.3"; // keep in sync with @version above
+  const VERSION = "1.1.5"; // keep in sync with @version above
   const UPDATE_URL = "https://raw.githubusercontent.com/SarcasticGeekJr/torn-watch-geek/main/torn-watch-geek.user.js";
   const TORN = "https://api.torn.com";
   const FFS = "https://ffscouter.com/api/v1/get-stats";
@@ -101,7 +101,7 @@
     fab: null,
     tab: "watch",
     hunt: "live",
-    live: { running: false, min: 1000000, onlyAway: false, win: "", item: "", alertMin: 1000000, poolMax: 30, calls: 25 },
+    live: { running: false, min: 1000000, max: "", onlyAway: false, win: "", item: "", alertMin: 1000000, poolMax: 30, calls: 25 },
     sleep: { types: [], days: 14, minStars: 0, companies: 30, okOnly: true },
     search: {
       name: "", faction: "", lvlMin: "", lvlMax: "", inMin: "", inMax: "", okOnly: true, nwMin: "", offMin: "", offMax: "",
@@ -590,16 +590,18 @@
 
   async function getCompany(cid, opts = {}) {
     const c = CO[cid];
-    if (c && c.emps && !opts.force && now() - c.t < COMPANY_TTL) return c;
-    const d = await torn(`/company/${cid}?selections=profile`, COMPANY_TTL, opts);
+    if (c && c.emps && c.v === 2 && !opts.force && now() - c.t < COMPANY_TTL) return c;
+    // Workers come from the "employees" selection (company_employees); "profile" may leave them out.
+    const d = await torn(`/company/${cid}?selections=profile,employees`, COMPANY_TTL, opts);
     const co = d.company || d;
     const emps = {};
-    for (const [uid, e] of Object.entries(co.employees || {})) {
+    for (const [uid, e] of Object.entries(d.company_employees || co.employees || {})) {
       const la = e.last_action || {};
       emps[uid] = { n: e.name, pos: e.position, dic: +e.days_in_company || 0, la: +la.timestamp || null, st: (e.status && e.status.state) || "" };
       upsert(uid, { n: e.name, la: emps[uid].la, st: emps[uid].st || null, co: +cid, ct: +co.company_type || null, pos: e.position, dic: emps[uid].dic, src: "company" });
     }
     CO[cid] = {
+      v: 2,
       t: now(),
       n: co.name,
       type: +co.company_type || 0,
@@ -648,6 +650,7 @@
       if (d && d.error) throw new Error(d.error.error || d.error.message || d.error);
       const arr = Array.isArray(d) ? d : d.data || d.results || [];
       ffErr = "";
+      for (const k of Object.keys(ffTried)) delete ffTried[k];
       for (const r of arr) {
         const id = +(r.player_id || r.id);
         if (!id) continue;
@@ -1440,7 +1443,8 @@
   function setMsg(t) {
     view.msg = t;
     const m = $(".hunt-msg");
-    if (m) m.innerHTML = t;
+    // Live sales has its own status line; messages from the other tabs don't belong there.
+    if (m) m.innerHTML = S.hunt === "live" ? "" : t;
   }
   function renderGrowMsg() {
     const m = $(".grow-msg");
@@ -1552,7 +1556,11 @@
         <span class="small livestat"></span>
       </div>
       <div class="chips">${chips.map((v) => `<button class="chip ${+f.min === v ? "on" : ""}" data-act="liveMin" data-v="${v}">${short(v)}+</button>`).join("")}
-        <input class="chip-in" data-lf="min" type="number" inputmode="numeric" placeholder="custom $" value="${chips.includes(+f.min) ? "" : esc(f.min)}"></div>
+</div>
+      <div class="filters two">
+        <label>Min amount ($)<input data-lf="min" type="number" inputmode="numeric" placeholder="0" value="${esc(f.min)}"></label>
+        <label>Max amount ($)<input data-lf="max" type="number" inputmode="numeric" placeholder="no max" value="${esc(f.max)}"></label>
+      </div>
       <div class="filters">
         <label>Win chance<select data-lf="win"><option value="">Any</option><option value="easy" ${f.win === "easy" ? "selected" : ""}>🟢 Easy</option><option value="likely" ${f.win === "likely" ? "selected" : ""}>🟡 Likely+</option><option value="risky" ${f.win === "risky" ? "selected" : ""}>🟠 Risky+</option></select></label>
         <label>Item has<input data-lf="item" type="text" placeholder="any" value="${esc(f.item)}"></label>
@@ -1582,6 +1590,7 @@
         if (["poolMax", "calls"].includes(k)) f[k] = Math.max(1, Math.min(k === "calls" ? 100 : 200, +el.value || DEFAULTS.live[k]));
         save();
         if (k === "min") $$(".chip[data-act=liveMin]").forEach((c) => c.classList.toggle("on", +c.dataset.v === +f.min));
+        if (k === "max" && el.value === "") f.max = "";
         drawLive();
       })
     );
@@ -1601,11 +1610,15 @@
     const n = Object.keys(POOL).length;
     if (st) st.innerHTML = f.running ? `<span class="g">● Live</span> · ${n} sellers${liveLast ? ` · last check ${clock(liveLast)}` : ""}${apiQueued() ? " · waiting for API limit" : ""}` : `<span class="muted">Paused</span>`;
     const min = +f.min || 0;
+    const max = +f.max || 0; // 0 = no maximum
     let noStats = 0;
     const all = LIVE.filter((r) => {
       const hot = isHot(r);
       if (f.onlyAway && !hot) return false;
-      if (r.v < min && !(hot && unbanked(r.pid) >= min)) return false;
+      // The amount that matters: the sale, or for 🔥 sellers everything unbanked since they were last seen.
+      const amt = hot ? Math.max(r.v, unbanked(r.pid)) : r.v;
+      if (amt < min) return false;
+      if (max && amt > max) return false;
       if (f.item && !r.item.toLowerCase().includes(f.item.toLowerCase())) return false;
       if (f.win) {
         const k = winOf(r.pid).k;
@@ -1615,9 +1628,11 @@
       return true;
     });
     const rows = all.slice(0, 100);
+    const missing = [...new Set(LIVE.slice(0, 150).map((r) => r.pid))].filter(needStats);
+    if (missing.length) missing.forEach((pid) => stats(pid).then(drawLiveSoon));
     // Say exactly which filters are on, so it's clear what is being used.
     const winLbl = { easy: "🟢 Easy", likely: "🟡 Likely or better", risky: "🟠 Risky or better" }[f.win];
-    const on = [`sales of ${short(min)} or more`, f.onlyAway ? "🔥 away only" : "", winLbl ? winLbl + " only" : "", f.item ? `item has "${esc(f.item)}"` : ""].filter(Boolean);
+    const on = [max ? `sales of ${short(min)} to ${short(max)}` : `sales of ${short(min)} or more`, f.onlyAway ? "🔥 away only" : "", winLbl ? winLbl + " only" : "", f.item ? `item has "${esc(f.item)}"` : ""].filter(Boolean);
     const sum = `<p class="small livesum">Showing <b>${all.length}</b> of ${LIVE.length} sales · ${on.join(" · ")}${noStats ? ` · <span class="a">${noStats} hidden because their stats haven't loaded${ffErr ? ` (${esc(ffErr)})` : ""}</span>` : ""}</p>`;
     box.innerHTML =
       sum +
@@ -1753,11 +1768,16 @@
         drawSoon();
       }
       const shown = list.filter((r) => !r.hidden);
-      setMsg(`${shown.length} sleeping workers in ${cos.length} companies. Getting stats…`);
+      const seen = cos.reduce((a, c) => a + (CO[c.cid] ? Object.keys(CO[c.cid].emps || {}).length : 0), 0);
+      if (!seen && cos.length) {
+        setMsg(`<span class="r">Torn sent no worker lists for these ${cos.length} companies, so nothing could be checked.</span>`);
+        return;
+      }
+      setMsg(`${shown.length} sleeping workers in ${cos.length} companies (${seen} workers checked). Getting stats…`);
       drawResults();
       await Promise.all(shown.slice(0, 80).map((r) => stats(r.id)));
       if (view.runId === runId) {
-        setMsg(`${shown.length} sleeping workers in ${cos.length} companies. Pay estimates are rough; the director may have fired them or cut their pay.`);
+        setMsg(`${shown.length} sleeping workers in ${cos.length} companies (${seen} workers checked). Pay estimates are rough; the director may have fired them or cut their pay.`);
         drawSoon();
       }
     } catch (e) {
@@ -1807,7 +1827,7 @@
       <label class="tog"><input type="checkbox" data-f="noClothing" ${f.noClothing ? "checked" : ""}> Hide 7★+ clothing store workers (−75% mug)</label>
       <label class="tog">Hide players I mugged in the last<input class="num" data-f="hideMugged" type="number" inputmode="numeric" value="${esc(f.hideMugged)}"> days</label>
       <label class="tog">Check details of the top<input class="num" data-f="check" type="number" inputmode="numeric" value="${esc(f.check)}"> results</label>
-      <div class="row-btn"><button class="btn" data-act="searchGo">Search</button><button class="btn ghost" data-act="grow" ${growBusy ? "disabled" : ""}>➕ Find more players</button></div>
+      <div class="row-btn"><button class="btn" data-act="searchGo">Search</button><button class="btn ghost" data-act="grow" ${growBusy ? "disabled" : ""}>➕ Find more players</button><button class="btn ghost" data-act="searchReset">Reset filters</button></div>
       <p class="muted small">Searching <b>${n.toLocaleString()}</b> players saved on this phone. 'Find more players' uses ${S.grow.calls} API calls and adds up to ${S.grow.calls * 100} from the Hall of Fame and faction lists. <span class="grow-msg">${esc(growMsg)}</span></p>`;
     bindForm(f);
     if (!CTYPES && apiKey()) companyTypes().then(() => S.hunt === "search" && view.name === "hunt" && !root.activeElement && searchForm()).catch(() => {});
@@ -1817,25 +1837,27 @@
   function needsProfile(f) {
     return !!(f.ageMin || f.ageMax || f.gender || f.property || f.ctype || f.starsMin || f.starsMax || f.noClothing || f.okOnly);
   }
-  function matchCheap(id, p, f) {
+  // Returns "" when the player passes the quick filters, or the name of the first filter that ruled them out.
+  function cheapFail(id, p, f) {
     const L = numOr;
-    if (f.name && !(p.n || "").toLowerCase().includes(f.name.toLowerCase())) return false;
+    if (f.name && !(p.n || "").toLowerCase().includes(f.name.toLowerCase())) return "name";
     if (f.faction) {
       const q = f.faction.trim().toLowerCase();
-      if (/^\d+$/.test(q) ? +q !== p.f : !(p.fn || "").toLowerCase().includes(q)) return false;
+      if (/^\d+$/.test(q) ? +q !== p.f : !(p.fn || "").toLowerCase().includes(q)) return "faction";
     }
-    if (L(f.lvlMin) != null && (p.lv == null || p.lv < +f.lvlMin)) return false;
-    if (L(f.lvlMax) != null && (p.lv == null || p.lv > +f.lvlMax)) return false;
+    if (L(f.lvlMin) != null && (p.lv == null || p.lv < +f.lvlMin)) return "level";
+    if (L(f.lvlMax) != null && (p.lv == null || p.lv > +f.lvlMax)) return "level";
     const inact = daysSince(p.la);
-    if (L(f.inMin) != null && (inact == null || inact < +f.inMin)) return false;
-    if (L(f.inMax) != null && (inact == null || inact > +f.inMax)) return false;
-    if (L(f.nwMin) != null && (p.nw == null || p.nw < +f.nwMin)) return false;
-    if (L(f.offMin) != null && (p.off == null || p.off < +f.offMin)) return false;
-    if (L(f.offMax) != null && p.off != null && p.off > +f.offMax) return false;
-    if (+f.hideMugged > 0 && MUGGED[id] && now() - MUGGED[id] < +f.hideMugged * DAY) return false;
-    if (f.okOnly && p.st && p.st !== "Okay" && now() - (p.t || 0) < HOUR) return false;
-    return true;
+    if (L(f.inMin) != null && (inact == null || inact < +f.inMin)) return "inactive days";
+    if (L(f.inMax) != null && (inact == null || inact > +f.inMax)) return "inactive days";
+    if (L(f.nwMin) != null && (p.nw == null || p.nw < +f.nwMin)) return "networth (only known for Hall of Fame players)";
+    if (L(f.offMin) != null && (p.off == null || p.off < +f.offMin)) return "offences (only known for Hall of Fame players)";
+    if (L(f.offMax) != null && p.off != null && p.off > +f.offMax) return "offences";
+    if (+f.hideMugged > 0 && MUGGED[id] && now() - MUGGED[id] < +f.hideMugged * DAY) return "mugged recently";
+    if (f.okOnly && p.st && p.st !== "Okay" && now() - (p.t || 0) < HOUR) return "not Okay";
+    return "";
   }
+  const matchCheap = (id, p, f) => !cheapFail(id, p, f);
   // Returns true (pass), false (fail) or null (still waiting for data).
   function matchSlow(id, p, f) {
     const L = numOr;
@@ -1874,10 +1896,21 @@
   }
   function searchGo() {
     const f = S.search;
-    const all = Object.entries(DB).filter(([id, p]) => matchCheap(+id, p, f));
+    const why = {};
+    const all = Object.entries(DB).filter(([id, p]) => {
+      const r = cheapFail(+id, p, f);
+      if (r) why[r] = (why[r] || 0) + 1;
+      return !r;
+    });
     if (!all.length) {
       view.results = { mode: "search", list: [] };
-      view.msg = Object.keys(DB).length ? "" : "Your players list is empty. Tap '➕ Find more players' first.";
+      const total = Object.keys(DB).length;
+      view.msg = total
+        ? `None of your <b>${total.toLocaleString()}</b> saved players pass the filters. Ruled out by: ${Object.entries(why)
+            .sort((a, b) => b[1] - a[1])
+            .map(([k, n]) => `<b>${esc(k)}</b> ${n.toLocaleString()}`)
+            .join(" · ")}. <button class="link" data-act="searchReset">Reset filters</button>`
+        : "Your players list is empty. Tap '➕ Find more players' first.";
       drawResults();
       return;
     }
@@ -2018,6 +2051,7 @@
         save();
         memo.clear();
         deadKey = "";
+        for (const k of Object.keys(ffTried)) delete ffTried[k];
         ffErr = "";
         toast("Saved");
       })
@@ -2172,6 +2206,13 @@
         break;
       case "searchGo":
         searchGo();
+        break;
+      case "searchReset":
+        S.search = Object.assign({}, DEFAULTS.search);
+        save();
+        view.results = null;
+        view.msg = "Filters cleared. Tap Search to list your saved players.";
+        render();
         break;
       case "grow":
         if (!apiKey()) return toast("Add an API key first", "bad");

@@ -43,7 +43,7 @@ Updates: Torn PDA checks when the app starts (or Settings → Userscripts → �
 - The pool fills itself from Torn's weekly top-earning bazaars and big sellers found on TornW3B. You can add anyone.
 - 🔥 means they sold **while away**: offline since the sale, flying, or abroad anywhere except the Cayman Islands (which has a bank). The money is probably still on hand.
 - Each 🔥 row shows the total unbanked since they were last seen, plus a mug estimate. When they come back, the row turns grey ("probably banked").
-- Filters: $500k / $1M / $5M / $10M or your own amount, only 🔥, win chance, item.
+- Filters: min and max amount (quick chips: $500k / $1M / $5M / $10M), only 🔥, win chance, item. A line above the list says which filters are on.
 - 🔥 alert (pop-up and vibration) when someone's unbanked total passes your alert amount.
 - Speed: the default is 25 API calls a minute for live, and each seller is checked at most every 30 seconds. Torn **delays bazaar data on purpose** to slow down mug bots, so sales show up a little after they happen. Times shown are Torn's.
 - Watched players' bazaar sales and TornW3B sales also show up here.
