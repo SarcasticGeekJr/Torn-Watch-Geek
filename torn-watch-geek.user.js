@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Watch Geek
 // @namespace    https://github.com/SarcasticGeekJr/torn-watch-geek
-// @version      1.5.1
+// @version      1.5.2
 // @description  Watch players (online, hospital, jail, flight landing times, bazaar and Item Market listings) and find mug targets: rich sellers, sleeping workers in high-paying companies, and your own advanced search, all with estimated battle stats and win chance. Built for Torn PDA, works in Tampermonkey too.
 // @author       SarcasticGeekJr
 // @match        https://www.torn.com/*
@@ -50,7 +50,7 @@
 
   // ---------------------------------------------------------------- config
   const PDA_KEY = "###PDA-APIKEY###"; // Torn PDA replaces this with your key at runtime
-  const VERSION = "1.5.1"; // keep in sync with @version above
+  const VERSION = "1.5.2"; // keep in sync with @version above
   const UPDATE_URL = "https://raw.githubusercontent.com/SarcasticGeekJr/torn-watch-geek/main/torn-watch-geek.user.js";
   const TORN = "https://api.torn.com";
   const FFS = "https://ffscouter.com/api/v1/get-stats";
@@ -470,6 +470,11 @@
     const src = e.manual ? "take-off time you entered" : "";
     if (!e.known)
       return `✈️ ${esc(dest)}${tk} · Landing time unknown<br><span class="muted tl2">Already flying when tracking started. Latest possible landing: ${clock(e.hi)}. ${where === "page" ? "Enter the take-off time below if you know it." : "Tap to enter take-off time."}</span>`;
+    const tr = w.trip || {};
+    if (tr.bound && !e.manual) {
+      // Take-off only known to be between two times, so the landing is a range too.
+      return `✈️ ${esc(dest)}${tk} · lands between ${clock(Math.max(e.lo, now()))} and ${clock(e.hi)}<br><span class="muted tl2">Took off between ${clock(tr.depLo)} and ${clock(tr.depHi)} (seen on the ground at ${clock(tr.depLo)}).</span>`;
+    }
     if (e.single) {
       const o = e.opts[0];
       return `✈️ ${esc(dest)}${tk} · lands ~${clock(o.mid)} <small class="muted">(in ${dur(o.mid - now())}${src ? ", " + src : ""})</small>`;
@@ -507,6 +512,15 @@
     }
     return ` · flies ${TICKETS[fits[0]]}`;
   }
+  // Take-off not seen: they can't have left before the last time they were seen on the ground
+  // (by this script, or by the background tracker, for example a landing it logged).
+  function boundTrip(id, w, groundBefore) {
+    const tr = w.trip;
+    if (!tr || tr.depLo || tr.manual) return;
+    const bg = (BG.ground && BG.ground[id]) || 0;
+    const lo = Math.max(groundBefore || 0, bg);
+    if (lo && lo < tr.depHi) Object.assign(tr, { depLo: lo, bound: true });
+  }
   const planeOf = (p) => (p && p.status && (p.status.plane_image_type || p.status.travel_type)) || undefined;
   // Called with each fresh profile of a watched player. Works out trips, landings and alerts.
   function updateWatched(id, p) {
@@ -518,6 +532,7 @@
     cur.la = p.last_action ? { status: p.last_action.status, ts: +p.last_action.timestamp || 0 } : null;
     w.name = p.name || w.name;
     const prevSeen = w.seenAt || 0;
+    const groundBefore = w.groundAt || 0; // last time seen not flying, before this check
     const fresh = prevSeen && t - prevSeen < Math.max(3, (S.pollSec * 3) / 60) * MIN; // previous check is recent enough to time things
 
     const late = fresh ? "" : " (while Torn was closed)";
@@ -566,6 +581,8 @@
       const la = cur.la && cur.la.ts ? cur.la.ts * 1000 : 0;
       if (!w.trip.depLo && la && la < w.trip.depHi) w.trip.depHi = la;
     }
+    if (!cur.trip) w.groundAt = t;
+    if (w.trip && cur.trip) boundTrip(id, w, groundBefore);
     w.s = cur;
     w.seenAt = t;
     w.level = p.level;
@@ -1205,6 +1222,7 @@
       if (d.error) throw new Error(d.error);
       const evs = (d.events || []).sort((a, b) => a.t - b.t);
       evs.forEach(applyBg);
+      for (const [wid, ww] of Object.entries(W)) if (ww.trip && !ww.trip.depLo) boundTrip(+wid, ww, 0);
       if (evs.length) BG.since = Math.max(BG.since || 0, ...evs.map((e) => e.t));
       BG.status = { lastTick: d.lastTick, dead: d.dead || "", version: d.version };
       BG.err = d.dead ? "Tracker stopped: " + d.dead : "";
@@ -1224,7 +1242,7 @@
   function bgTripTimes(id, trip) {
     const bt = BG.trips[id];
     if (!bt || !trip || bt.key !== tripKey(trip) || !bt.depLo || now() - bt.depHi > 6 * HOUR) return;
-    Object.assign(trip, { depLo: bt.depLo, depHi: bt.depHi, manual: false, bg: true });
+    Object.assign(trip, { depLo: bt.depLo, depHi: bt.depHi, manual: false, bg: true, bound: false });
     if (bt.plane && !trip.plane) trip.plane = bt.plane;
   }
   function applyBg(e) {
@@ -1238,6 +1256,10 @@
       if (w && w.trip) bgTripTimes(e.id, w.trip);
     }
     if (e.kind === "land" && w && x.depLo && x.arrLo) learnTicket(w, x.country, x.plane, x.arrLo - x.depHi, x.arrHi - x.depLo);
+    if (e.kind === "land" && (x.arrHi || e.t)) {
+      BG.ground = BG.ground || {};
+      BG.ground[e.id] = Math.max(BG.ground[e.id] || 0, x.arrHi || e.t);
+    }
     if (e.kind === "bazaar" && x.sold) addSale(e.id, x.sold, e.text, "bazaar");
     // Feed: skip what this script already logged itself around the same time.
     if (EVENTS.some((v) => v.pid === e.id && v.kind === e.kind && Math.abs(v.t - e.t) < 3 * MIN)) return;
@@ -1571,7 +1593,7 @@
           ${!est.single ? `<div class="small muted">${est.known ? "If they flew" : "Latest landing if they flew"}: ${est.opts.map((o) => `${TICKETS[o.k]} ${est.known ? "~" + clock(o.mid) : "by " + clock(o.hi)}`).join(" · ")}</div>` : ""}
           <div class="small muted">${planeNote(w)}</div>
           ${
-            !est.known || est.manual
+            !est.known || est.manual || (w.trip && w.trip.bound)
               ? `<div class="tof"><div class="small">${est.manual ? "You entered when they took off. Change it:" : "Do you know when they took off? Enter it and the landing time is worked out from that."}</div>
             <div class="tof-row"><input class="tof-time" type="time" value="${w.trip && w.trip.manualClock ? esc(w.trip.manualClock) : ""}"><select class="tof-tz"><option value="local">your phone's time</option><option value="tct" ${w.trip && w.trip.manualTz === "tct" ? "selected" : ""}>Torn time (TCT)</option></select></div>
             <div class="tof-row"><span class="small">or took off</span><input class="tof-ago" type="number" inputmode="numeric" placeholder="min" min="0"><span class="small">minutes ago</span><button class="btn sm" data-act="tofSet" data-id="${id}">Use this</button>${est.manual ? `<button class="link small" data-act="tofClear" data-id="${id}">clear</button>` : ""}</div></div>`
@@ -2730,7 +2752,7 @@
         }
         if (!dep) return toast("Enter a time or minutes ago", "bad");
         if (dep > now()) dep = now();
-        Object.assign(w.trip, { depLo: dep - MIN, depHi: dep + MIN, manual: true, manualClock: tm || "", manualTz: tz });
+        Object.assign(w.trip, { depLo: dep - MIN, depHi: dep + MIN, manual: true, bound: false, manualClock: tm || "", manualTz: tz });
         saveSoon("watch");
         toast("Take-off time set", "ok");
         render();
