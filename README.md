@@ -50,7 +50,7 @@ Updates: Torn PDA checks when the app starts (or Settings → Userscripts → �
 
 **😴 Sleeping workers:** inactive employees of high-paying companies. Their daily wages pile up as cash on hand.
 - Pick company types (Oil Rig and Mining Corporation are selected by default), days inactive (default 14) and minimum stars.
-- It checks the highest-income companies first and lists inactive workers with a rough "unbanked pay" estimate. The estimate only counts days since they joined that company.
+- By default it checks a mix of companies of all sizes (top companies fire inactive staff fast); you can switch to "Best pay first". After each run it reports how many companies and workers it checked and the longest inactive worker it saw. It and lists inactive workers with a rough "unbanked pay" estimate. The estimate only counts days since they joined that company.
 - The director may have fired them or cut their pay, so treat the money as a guess.
 
 **🔎 Search:** your own advanced search, no Donator Pack needed.

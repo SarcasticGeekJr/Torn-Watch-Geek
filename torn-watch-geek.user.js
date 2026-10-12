@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Watch Geek
 // @namespace    https://github.com/SarcasticGeekJr/torn-watch-geek
-// @version      1.1.5
+// @version      1.1.6
 // @description  Watch players (online, hospital, jail, flight landing times, bazaar and Item Market listings) and find mug targets: rich sellers, sleeping workers in high-paying companies, and your own advanced search, all with estimated battle stats and win chance. Built for Torn PDA, works in Tampermonkey too.
 // @author       SarcasticGeekJr
 // @match        https://www.torn.com/*
@@ -48,7 +48,7 @@
 
   // ---------------------------------------------------------------- config
   const PDA_KEY = "###PDA-APIKEY###"; // Torn PDA replaces this with your key at runtime
-  const VERSION = "1.1.5"; // keep in sync with @version above
+  const VERSION = "1.1.6"; // keep in sync with @version above
   const UPDATE_URL = "https://raw.githubusercontent.com/SarcasticGeekJr/torn-watch-geek/main/torn-watch-geek.user.js";
   const TORN = "https://api.torn.com";
   const FFS = "https://ffscouter.com/api/v1/get-stats";
@@ -102,7 +102,7 @@
     tab: "watch",
     hunt: "live",
     live: { running: false, min: 1000000, max: "", onlyAway: false, win: "", item: "", alertMin: 1000000, poolMax: 30, calls: 25 },
-    sleep: { types: [], days: 14, minStars: 0, companies: 30, okOnly: true },
+    sleep: { types: [], days: 14, minStars: 0, companies: 40, okOnly: true, pick: "mix" },
     search: {
       name: "", faction: "", lvlMin: "", lvlMax: "", inMin: "", inMax: "", okOnly: true, nwMin: "", offMin: "", offMax: "",
       ageMin: "", ageMax: "", gender: "", property: "", ctype: "", starsMin: "", starsMax: "", noClothing: true,
@@ -591,8 +591,18 @@
   async function getCompany(cid, opts = {}) {
     const c = CO[cid];
     if (c && c.emps && c.v === 2 && !opts.force && now() - c.t < COMPANY_TTL) return c;
-    // Workers come from the "employees" selection (company_employees); "profile" may leave them out.
-    const d = await torn(`/company/${cid}?selections=profile,employees`, COMPANY_TTL, opts);
+    // Workers may come with "profile" or only with "employees" (company_employees). Ask for both,
+    // and if Torn refuses "employees" for someone else's company, use the profile alone.
+    let d;
+    if (!getCompany.noEmployees) {
+      try {
+        d = await torn(`/company/${cid}?selections=profile,employees`, COMPANY_TTL, opts);
+      } catch (e) {
+        if (!/relation|access|permission|selection|field/i.test(e.message)) throw e;
+        getCompany.noEmployees = true;
+      }
+    }
+    if (!d) d = await torn(`/company/${cid}?selections=profile`, COMPANY_TTL, opts);
     const co = d.company || d;
     const emps = {};
     for (const [uid, e] of Object.entries(d.company_employees || co.employees || {})) {
@@ -1500,7 +1510,7 @@
       return;
     }
     const shown = rs.filter((r) => !r.hidden);
-    box.innerHTML = shown.length ? shown.slice(0, 80).map(resultCard).join("") : `<p class="muted hint">No players match. Try looser filters${S.hunt === "search" ? " or tap 'Find more players'" : ""}.</p>`;
+    box.innerHTML = shown.length ? shown.slice(0, 80).map(resultCard).join("") : `<p class="muted hint">${S.hunt === "sleep" ? "No sleeping workers found. See the report above." : "No players match. Try looser filters or tap 'Find more players'."}</p>`;
   }
   const drawSoon = (() => {
     let t = 0;
@@ -1706,6 +1716,7 @@
         <label>Inactive at least (days)<input data-f="days" type="number" inputmode="numeric" value="${esc(f.days)}"></label>
         <label>Company stars at least<input data-f="minStars" type="number" inputmode="numeric" min="0" max="10" value="${esc(f.minStars)}"></label>
         <label>Companies to check<input data-f="companies" type="number" inputmode="numeric" value="${esc(f.companies)}"></label>
+        <label>Which companies<select data-f="pick"><option value="mix" ${f.pick !== "top" ? "selected" : ""}>Mix (all sizes)</option><option value="top" ${f.pick === "top" ? "selected" : ""}>Best pay first</option></select></label>
       </div>
       <label class="tog"><input type="checkbox" data-f="okOnly" ${f.okOnly ? "checked" : ""}> Only show players who are Okay</label>
       <div class="row-btn"><button class="btn" data-act="sleepGo">Find sleeping workers</button></div>
@@ -1733,10 +1744,20 @@
         }
       }
       cos = cos.filter((c) => c.stars >= (+f.minStars || 0) && c.emp > 0).sort((a, b) => b.inc / b.emp - a.inc / a.emp || b.stars - a.stars);
-      cos = cos.slice(0, Math.max(1, Math.min(200, +f.companies || 30)));
+      const want = Math.max(1, Math.min(200, +f.companies || 40));
+      const listed = cos.length;
+      // Top companies fire inactive staff fast, so by default spread the picks across the whole list.
+      if (f.pick === "top" || cos.length <= want) cos = cos.slice(0, want);
+      else {
+        const step = cos.length / want;
+        cos = Array.from({ length: want }, (_, k) => cos[Math.floor(k * step)]);
+      }
       const minDays = +f.days || 14;
       const list = view.results.list;
-      let i = 0;
+      let i = 0,
+        failed = 0,
+        lastErr = "",
+        longest = null;
       for (const c of cos) {
         if (view.runId !== runId) return;
         i++;
@@ -1744,12 +1765,15 @@
         let co;
         try {
           co = await getCompany(c.cid, { hi: true });
-        } catch {
+        } catch (e) {
+          failed++;
+          lastErr = e.message;
           continue;
         }
         const perEmp = co.inc / Math.max(1, co.emp);
         for (const [uid, e] of Object.entries(co.emps)) {
           const inact = daysSince(e.la);
+          if (inact != null && (!longest || inact > longest.d)) longest = { d: inact, n: e.n, co: co.n };
           if (inact == null || inact < minDays) continue;
           const paidDays = Math.min(inact, e.dic || inact);
           const wage = (perEmp * (+S.wageShare || 30)) / 100;
@@ -1767,17 +1791,25 @@
         list.sort((a, b) => b.score - a.score);
         drawSoon();
       }
+      // A plain report of what was checked, so an empty list is never a mystery.
+      const report = () => {
+        const seenN = cos.reduce((a, c) => a + (CO[c.cid] ? Object.keys(CO[c.cid].emps || {}).length : 0), 0);
+        const hiddenN = list.filter((r) => r.hidden).length;
+        const bits = [`${listed} companies listed by Torn`, `${cos.length - failed} checked`, `${seenN} workers looked at`, `${list.length} inactive ${minDays}+ days`];
+        if (hiddenN) bits.push(`${hiddenN} hidden (not Okay or mugged recently)`);
+        if (failed) bits.push(`<span class="r">${failed} companies failed: ${esc(lastErr)}</span>`);
+        let tip = "";
+        if (!list.length && longest) tip = `<br>Longest inactive worker: <b>${Math.floor(longest.d)} days</b> (${esc(longest.n || "")} at ${esc(longest.co || "")}). Try a lower "Inactive at least", more companies, or "Which companies: Mix".`;
+        if (!seenN && !failed && cos.length) tip = `<br><span class="r">Torn sent no worker lists for these companies, so nothing could be checked.</span>`;
+        return bits.join(" · ") + tip;
+      };
       const shown = list.filter((r) => !r.hidden);
-      const seen = cos.reduce((a, c) => a + (CO[c.cid] ? Object.keys(CO[c.cid].emps || {}).length : 0), 0);
-      if (!seen && cos.length) {
-        setMsg(`<span class="r">Torn sent no worker lists for these ${cos.length} companies, so nothing could be checked.</span>`);
-        return;
-      }
-      setMsg(`${shown.length} sleeping workers in ${cos.length} companies (${seen} workers checked). Getting stats…`);
+      setMsg(report() + (shown.length ? " · getting stats…" : ""));
       drawResults();
+      if (!shown.length) return;
       await Promise.all(shown.slice(0, 80).map((r) => stats(r.id)));
       if (view.runId === runId) {
-        setMsg(`${shown.length} sleeping workers in ${cos.length} companies (${seen} workers checked). Pay estimates are rough; the director may have fired them or cut their pay.`);
+        setMsg(report() + ". Pay estimates are rough; the director may have fired them or cut their pay.");
         drawSoon();
       }
     } catch (e) {
