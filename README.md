@@ -3,7 +3,7 @@
 A Torn userscript for **Torn PDA** (also works in Tampermonkey). It does two jobs:
 
 - **👁 Watch** players: online/offline, hospital, jail, flights with landing times, and new bazaar or Item Market listings.
-- **🎯 Hunt** for mug targets: rich sellers, sleeping workers in high-paying companies, and your own advanced search. Every result shows estimated battle stats and a win chance.
+- **🎯 Hunt** for mug targets: live bazaar sales and your own advanced search (including inactive workers in high-paying companies). Every result shows estimated battle stats and a win chance.
 
 It only reads data. Profile, Attack and Bazaar buttons just open the page. It never attacks, buys, sells or clicks anything for you.
 
@@ -48,12 +48,8 @@ Updates: Torn PDA checks when the app starts (or Settings → Userscripts → �
 - Speed: the default is 25 API calls a minute for live, and each seller is checked at most every 30 seconds. Torn **delays bazaar data on purpose** to slow down mug bots, so sales show up a little after they happen. Times shown are Torn's.
 - Watched players' bazaar sales and TornW3B sales also show up here.
 
-**😴 Sleeping workers:** inactive employees of high-paying companies. Their daily wages pile up as cash on hand.
-- Pick company types (Oil Rig and Mining Corporation are selected by default), days inactive (default 14) and minimum stars.
-- By default it checks a mix of companies of all sizes (top companies fire inactive staff fast); you can switch to "Best pay first". After each run it reports how many companies and workers it checked and the longest inactive worker it saw. It and lists inactive workers with a rough "unbanked pay" estimate. The estimate only counts days since they joined that company.
-- The director may have fired them or cut their pay, so treat the money as a guess.
-
 **🔎 Search:** your own advanced search, no Donator Pack needed.
+- **Sleeping workers** are part of Search. Pick company types (for example Oil Rig and Mining Corporation) and Search first reads those companies' worker lists, adds every worker, then filters them. By default it reads a mix of 40 companies of all sizes, because top companies fire inactive staff fast. Each worker shows days inactive and a rough "unbanked pay" guess (wages land as cash on hand). Sort by "Most unbanked pay" to see the best ones first.
 - First tap **➕ Find more players**. It builds a players list on your phone from the Hall of Fame (networth, offences, level) and faction member lists, 100 players per API call.
 - Filters: name, faction, level, inactive days, days old, offences, networth, gender, property, company type, company stars, max battle stats, win chance, Okay only, hide 7★ clothing store workers (−75% mug), hide players you mugged recently.
 - Quick filters run instantly on the saved list. The top results then get a fresh profile check (1 API call each) for status, gender, property, company and stars.

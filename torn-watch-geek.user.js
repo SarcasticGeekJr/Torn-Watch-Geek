@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Watch Geek
 // @namespace    https://github.com/SarcasticGeekJr/torn-watch-geek
-// @version      1.1.10
+// @version      1.2.0
 // @description  Watch players (online, hospital, jail, flight landing times, bazaar and Item Market listings) and find mug targets: rich sellers, sleeping workers in high-paying companies, and your own advanced search, all with estimated battle stats and win chance. Built for Torn PDA, works in Tampermonkey too.
 // @author       SarcasticGeekJr
 // @match        https://www.torn.com/*
@@ -48,7 +48,7 @@
 
   // ---------------------------------------------------------------- config
   const PDA_KEY = "###PDA-APIKEY###"; // Torn PDA replaces this with your key at runtime
-  const VERSION = "1.1.10"; // keep in sync with @version above
+  const VERSION = "1.2.0"; // keep in sync with @version above
   const UPDATE_URL = "https://raw.githubusercontent.com/SarcasticGeekJr/torn-watch-geek/main/torn-watch-geek.user.js";
   const TORN = "https://api.torn.com";
   const FFS = "https://ffscouter.com/api/v1/get-stats";
@@ -105,7 +105,7 @@
     sleep: { types: [], days: 14, minStars: 0, companies: 40, okOnly: true, pick: "mix" },
     search: {
       name: "", faction: "", lvlMin: "", lvlMax: "", inMin: "", inMax: "", okOnly: true, nwMin: "", offMin: "", offMax: "",
-      ageMin: "", ageMax: "", gender: "", property: "", ctype: "", starsMin: "", starsMax: "", noClothing: true,
+      ageMin: "", ageMax: "", gender: "", property: "", ctypes: [], companies: 40, pick: "mix", starsMin: "", starsMax: "", noClothing: true,
       maxStats: "", win: "", hideMugged: 3, sort: "score", check: 25,
     },
     grow: { sources: { networth: true, offences: true, level: false, factions: true }, calls: 10 },
@@ -136,8 +136,14 @@
   };
   const S = Object.assign({}, DEFAULTS, store.get("settings", {}));
   if (S.hunt === "rich") S.hunt = "live";
+  if (S.hunt === "sleep") S.hunt = "search"; // Sleeping workers became part of Search
   for (const k of ["alerts", "live", "sleep", "search", "grow"]) S[k] = Object.assign({}, DEFAULTS[k], S[k]);
   S.grow.sources = Object.assign({}, DEFAULTS.grow.sources, S.grow.sources);
+  if (!Array.isArray(S.search.ctypes)) S.search.ctypes = [];
+  if (S.search.ctype) {
+    S.search.ctypes = [+S.search.ctype];
+    delete S.search.ctype;
+  }
   const save = () => store.set("settings", S);
   const apiKey = () => (S.apiKey || (PDA_KEY.includes("#") ? "" : PDA_KEY)).trim();
   const myId = (() => {
@@ -1464,13 +1470,12 @@
       ${noKeyBox()}
       <div class="sorts slim">
         <button class="seg ${mode === "live" ? "on" : ""}" data-act="hunt" data-mode="live">📡 Live sales</button>
-        <button class="seg ${mode === "sleep" ? "on" : ""}" data-act="hunt" data-mode="sleep">😴 Sleeping workers</button>
         <button class="seg ${mode === "search" ? "on" : ""}" data-act="hunt" data-mode="search">🔎 Search</button>
       </div>
       <div class="hunt-form"></div>
       <div class="hunt-msg small muted"></div>
       <div class="cards results"></div>`;
-    ({ live: liveForm, sleep: sleepForm, search: searchForm })[mode]();
+    ({ live: liveForm, search: searchForm })[mode]();
     drawResults();
   }
   function setMsg(t) {
@@ -1728,136 +1733,55 @@
     };
   })();
 
-  // --- 😴 Sleeping workers
-  async function sleepForm() {
-    const f = S.sleep;
-    let types = CTYPES ? CTYPES.types : null;
-    if (!types && apiKey()) {
-      $(".hunt-form").innerHTML = `<div class="spin"></div>`;
+  // --- Company scan (used by Search when company types are picked)
+  // Reads the companies of the chosen types and saves every worker (with last action and job),
+  // so Search can filter them like any other player. Companies are cached for 6 hours.
+  async function scanCompanies(f, runId) {
+    let cos = [];
+    for (const t of f.ctypes) {
+      // Torn returns 100 companies per call, so page through (up to 5 pages per type).
+      for (let off = 0; off < 500; off += 100) {
+        setMsg(`Loading ${esc(typeName(t))} companies… ${off ? off + "+" : ""}`);
+        const d = await torn(`/company/${t}?selections=companies&limit=100&offset=${off}`, 6 * HOUR, { hi: true });
+        const rows = Object.entries(d.company || d.companies || {});
+        for (const [cid, c] of rows) cos.push({ cid: +(c.ID || cid), stars: +c.rating || 0, inc: +c.daily_income || 0, emp: +c.employees_hired || 0 });
+        if (rows.length < 100) break;
+      }
+    }
+    const listed = cos.length;
+    cos = cos.filter((c) => c.stars >= (numOr(f.starsMin) || 0) && (numOr(f.starsMax) == null || c.stars <= +f.starsMax) && c.emp > 0).sort((a, b) => b.inc / b.emp - a.inc / a.emp || b.stars - a.stars);
+    const want = Math.max(1, Math.min(200, +f.companies || 40));
+    // Top companies fire inactive staff fast, so by default spread the picks across the whole list.
+    if (f.pick === "top" || cos.length <= want) cos = cos.slice(0, want);
+    else {
+      const step = cos.length / want;
+      cos = Array.from({ length: want }, (_, k) => cos[Math.floor(k * step)]);
+    }
+    let i = 0,
+      failed = 0,
+      lastErr = "",
+      workers = 0;
+    for (const c of cos) {
+      if (view.runId !== runId) return null;
+      i++;
+      setMsg(`Reading companies ${i}/${cos.length}${apiQueued() ? " · waiting for API limit" : ""}`);
       try {
-        types = await companyTypes();
+        const co = await getCompany(c.cid, { hi: true });
+        workers += Object.keys(co.emps || {}).length;
       } catch (e) {
-        $(".hunt-form").innerHTML = `<p class="err">Couldn't load company types: ${esc(e.message)}</p>`;
-        return;
+        failed++;
+        lastErr = e.message;
       }
-      if (S.hunt !== "sleep" || view.name !== "hunt") return;
     }
-    types = types || {};
-    if (!f.types.length) {
-      f.types = Object.entries(types)
-        .filter(([, n]) => /oil rig|mining/i.test(n))
-        .map(([id]) => +id);
-      save();
-    }
-    $(".hunt-form").innerHTML = `
-      <div class="chips">${Object.entries(types)
-        .sort((a, b) => a[1].localeCompare(b[1]))
-        .map(([id, n]) => `<button class="chip ${f.types.includes(+id) ? "on" : ""}" data-act="ctype" data-id="${id}">${esc(n)}</button>`)
-        .join("")}</div>
-      <div class="filters">
-        <label>Inactive at least (days)<input data-f="days" type="number" inputmode="numeric" value="${esc(f.days)}"></label>
-        <label>Company stars at least<input data-f="minStars" type="number" inputmode="numeric" min="0" max="10" value="${esc(f.minStars)}"></label>
-        <label>Companies to check<input data-f="companies" type="number" inputmode="numeric" value="${esc(f.companies)}"></label>
-        <label>Which companies<select data-f="pick"><option value="mix" ${f.pick !== "top" ? "selected" : ""}>Mix (all sizes)</option><option value="top" ${f.pick === "top" ? "selected" : ""}>Best pay first</option></select></label>
-      </div>
-      <label class="tog"><input type="checkbox" data-f="okOnly" ${f.okOnly ? "checked" : ""}> Only show players who are Okay</label>
-      <div class="row-btn"><button class="btn" data-act="sleepGo">Find sleeping workers</button></div>
-      <p class="muted small">Uses 1 API call per company type, then 1 per company (saved for 6 hours). Wage pay is a guess: ${S.wageShare}% of the company's daily income per employee (change in ⚙️).</p>`;
-    bindForm(f);
+    return { listed, checked: cos.length - failed, workers, failed, lastErr };
   }
-  async function sleepGo() {
-    const f = S.sleep;
-    if (!f.types.length) return toast("Pick at least one company type", "bad");
-    view.results = { mode: "sleep", list: [] };
-    const runId = (view.runId = (view.runId || 0) + 1);
-    try {
-      let cos = [];
-      for (const t of f.types) {
-        // Torn returns 100 companies per call, so page through (up to 5 pages per type).
-        for (let off = 0; off < 500; off += 100) {
-          setMsg(`Loading ${esc(typeName(t))} companies… ${off ? off + "+" : ""}`);
-          const d = await torn(`/company/${t}?selections=companies&limit=100&offset=${off}`, 6 * HOUR, { hi: true });
-          const all = d.company || d.companies || {};
-          const rows = Object.entries(all);
-          for (const [cid, c] of rows) {
-            cos.push({ cid: +(c.ID || cid), type: t, stars: +c.rating || 0, inc: +c.daily_income || 0, emp: +c.employees_hired || 0, n: c.name });
-          }
-          if (rows.length < 100) break;
-        }
-      }
-      cos = cos.filter((c) => c.stars >= (+f.minStars || 0) && c.emp > 0).sort((a, b) => b.inc / b.emp - a.inc / a.emp || b.stars - a.stars);
-      const want = Math.max(1, Math.min(200, +f.companies || 40));
-      const listed = cos.length;
-      // Top companies fire inactive staff fast, so by default spread the picks across the whole list.
-      if (f.pick === "top" || cos.length <= want) cos = cos.slice(0, want);
-      else {
-        const step = cos.length / want;
-        cos = Array.from({ length: want }, (_, k) => cos[Math.floor(k * step)]);
-      }
-      const minDays = +f.days || 14;
-      const list = view.results.list;
-      let i = 0,
-        failed = 0,
-        lastErr = "",
-        longest = null;
-      for (const c of cos) {
-        if (view.runId !== runId) return;
-        i++;
-        setMsg(`Checking companies ${i}/${cos.length} · found ${list.length}${apiQueued() ? " · waiting for API limit" : ""}`);
-        let co;
-        try {
-          co = await getCompany(c.cid, { hi: true });
-        } catch (e) {
-          failed++;
-          lastErr = e.message;
-          continue;
-        }
-        const perEmp = co.inc / Math.max(1, co.emp);
-        for (const [uid, e] of Object.entries(co.emps)) {
-          const inact = daysSince(e.la);
-          if (inact != null && (!longest || inact > longest.d)) longest = { d: inact, n: e.n, co: co.n };
-          if (inact == null || inact < minDays) continue;
-          const paidDays = Math.min(inact, e.dic || inact);
-          const wage = (perEmp * (+S.wageShare || 30)) / 100;
-          const cash = paidDays * wage;
-          const mLo = mugRange(cash * 0.5, co.type, co.stars),
-            mHi = mugRange(cash * 1.5, co.type, co.stars);
-          list.push({
-            id: +uid,
-            cash,
-            score: cash,
-            line: `😴 Inactive <b>${Math.floor(inact)}d</b> at ${esc(co.n || "")} (${co.stars}★)${e.dic < inact ? ` · hired ${e.dic}d ago` : ""}<br>Est. unbanked pay ~<b>${short(cash * 0.5)}–${short(cash * 1.5)}</b>${mLo ? ` · mug ~${short(mLo[0])}–${short(mHi[1])}` : ""}`,
-            hidden: (f.okOnly && e.st && e.st !== "Okay") || (MUGGED[uid] && now() - MUGGED[uid] < 7 * DAY),
-          });
-          stats(+uid).then(drawSoon); // fetch stats as soon as a worker is found
-        }
-        list.sort((a, b) => b.score - a.score);
-        drawSoon();
-      }
-      // A plain report of what was checked, so an empty list is never a mystery.
-      const report = () => {
-        const seenN = cos.reduce((a, c) => a + (CO[c.cid] ? Object.keys(CO[c.cid].emps || {}).length : 0), 0);
-        const hiddenN = list.filter((r) => r.hidden).length;
-        const bits = [`${listed} companies listed by Torn`, `${cos.length - failed} checked`, `${seenN} workers looked at`, `${list.length} inactive ${minDays}+ days`];
-        if (hiddenN) bits.push(`${hiddenN} hidden (not Okay or mugged recently)`);
-        if (failed) bits.push(`<span class="r">${failed} companies failed: ${esc(lastErr)}</span>`);
-        let tip = "";
-        if (!list.length && longest) tip = `<br>Longest inactive worker: <b>${Math.floor(longest.d)} days</b> (${esc(longest.n || "")} at ${esc(longest.co || "")}). Try a lower "Inactive at least", more companies, or "Which companies: Mix".`;
-        if (!seenN && !failed && cos.length) tip = `<br><span class="r">Torn sent no worker lists for these companies, so nothing could be checked.</span>`;
-        return bits.join(" · ") + tip;
-      };
-      const shown = list.filter((r) => !r.hidden);
-      setMsg(report() + (shown.length ? " · getting stats…" : ""));
-      drawResults();
-      if (!shown.length) return;
-      await Promise.all(shown.slice(0, 80).map((r) => stats(r.id)));
-      if (view.runId === runId) {
-        setMsg(report() + ". Pay estimates are rough; the director may have fired them or cut their pay.");
-        drawSoon();
-      }
-    } catch (e) {
-      setMsg(`<span class="r">Couldn't finish: ${esc(e.message)}</span>`);
-    }
+  // Rough pay piled up while inactive (wages land as cash on hand).
+  function unbankedPay(p) {
+    const co = p.co ? CO[p.co] : null;
+    const inact = daysSince(p.la);
+    if (!co || !co.emp || inact == null || inact < 1) return null;
+    const wage = ((co.inc / Math.max(1, co.emp)) * (+S.wageShare || 30)) / 100;
+    return { days: inact, paid: Math.min(inact, p.dic || inact), cash: Math.min(inact, p.dic || inact) * wage, co };
   }
 
   // --- 🔎 Search (your own advanced search)
@@ -1883,10 +1807,6 @@
         <label>Win chance<select data-f="win"><option value="">Any</option><option value="easy" ${f.win === "easy" ? "selected" : ""}>🟢 Easy</option><option value="likely" ${f.win === "likely" ? "selected" : ""}>🟡 Likely+</option><option value="risky" ${f.win === "risky" ? "selected" : ""}>🟠 Risky+</option></select></label>
         <label>Gender<select data-f="gender"><option value="">Any</option>${["Male", "Female", "Enby"].map((g) => `<option ${f.gender === g ? "selected" : ""}>${g}</option>`).join("")}</select></label>
         <label>Property has${inp("property", "any", "text")}</label>
-        <label>Company type<select data-f="ctype"><option value="">Any</option>${Object.entries(types)
-          .sort((a, b) => a[1].localeCompare(b[1]))
-          .map(([id, nm]) => `<option value="${id}" ${+f.ctype === +id ? "selected" : ""}>${esc(nm)}</option>`)
-          .join("")}</select></label>
         <label>Stars from${inp("starsMin", "0")}</label><label>Stars to${inp("starsMax", "10")}</label>
         <label>Sort<select data-f="sort">${[
           ["score", "Best target"],
@@ -1894,10 +1814,22 @@
           ["nw", "Networth"],
           ["level", "Level (low)"],
           ["stats", "Weakest"],
+          ["unbanked", "Most unbanked pay"],
         ]
           .map(([v, l]) => `<option value="${v}" ${f.sort === v ? "selected" : ""}>${l}</option>`)
           .join("")}</select></label>
       </div>
+      <details class="more ctypes" ${f.ctypes.length ? "open" : ""}><summary>Company types: ${f.ctypes.length ? f.ctypes.map((t) => esc(typeName(t))).join(", ") : "any"}</summary>
+        <p class="muted small">Pick types (for example Oil Rig and Mining Corporation) to find their workers. Search reads those companies' worker lists (1 API call per company, saved for 6 hours), adds the workers to your list, and shows a guess of their unbanked pay. Wages land as cash on hand, so inactive workers pile it up.</p>
+        <div class="chips">${Object.entries(types)
+          .sort((a, b) => a[1].localeCompare(b[1]))
+          .map(([id, nm]) => `<button class="chip ${f.ctypes.includes(+id) ? "on" : ""}" data-act="sctype" data-id="${id}">${esc(nm)}</button>`)
+          .join("")}</div>
+        <div class="filters two">
+          <label>Companies to read<input data-f="companies" type="number" inputmode="numeric" value="${esc(f.companies)}"></label>
+          <label>Which companies<select data-f="pick"><option value="mix" ${f.pick !== "top" ? "selected" : ""}>Mix (all sizes)</option><option value="top" ${f.pick === "top" ? "selected" : ""}>Best pay first</option></select></label>
+        </div>
+      </details>
       <label class="tog"><input type="checkbox" data-f="okOnly" ${f.okOnly ? "checked" : ""}> Only Okay (not hospital, jail or flying)</label>
       <label class="tog"><input type="checkbox" data-f="noClothing" ${f.noClothing ? "checked" : ""}> Hide 7★+ clothing store workers (−75% mug)</label>
       <label class="tog">Hide players I mugged in the last<input class="num" data-f="hideMugged" type="number" inputmode="numeric" value="${esc(f.hideMugged)}"> days</label>
@@ -1910,7 +1842,7 @@
 
   // Which filters need a profile or company lookup (one API call each).
   function needsProfile(f) {
-    return !!(f.ageMin || f.ageMax || f.gender || f.property || f.ctype || f.starsMin || f.starsMax || f.noClothing || f.okOnly);
+    return !!(f.ageMin || f.ageMax || f.gender || f.property || f.starsMin || f.starsMax || f.noClothing || f.okOnly);
   }
   // Returns "" when the player passes the quick filters, or the name of the first filter that ruled them out.
   function cheapFail(id, p, f) {
@@ -1929,6 +1861,7 @@
     if (L(f.offMin) != null && (p.off == null || p.off < +f.offMin)) return "offences (only known for Hall of Fame players)";
     if (L(f.offMax) != null && p.off != null && p.off > +f.offMax) return "offences";
     if (+f.hideMugged > 0 && MUGGED[id] && now() - MUGGED[id] < +f.hideMugged * DAY) return "mugged recently";
+    if (f.ctypes && f.ctypes.length && !f.ctypes.includes(+p.ct)) return "company type";
     if (f.okOnly && p.st && p.st !== "Okay" && now() - (p.t || 0) < HOUR) return "not Okay";
     return "";
   }
@@ -1962,7 +1895,7 @@
     if (L(f.ageMax) != null && (p.age == null || p.age > +f.ageMax)) return no("days old");
     if (f.gender && p.g !== f.gender) return no("gender");
     if (f.property && !(p.pr || "").toLowerCase().includes(f.property.toLowerCase())) return no("property");
-    if (f.ctype && +p.ct !== +f.ctype) return no("company type");
+    if (f.ctypes && f.ctypes.length && !f.ctypes.includes(+p.ct)) return no("company type");
     const co = p.co ? CO[p.co] : null;
     if ((L(f.starsMin) != null || L(f.starsMax) != null || f.noClothing) && p.co && !co) return null;
     const stars = co ? co.stars : null;
@@ -1976,12 +1909,28 @@
     const inact = Math.min(60, daysSince(p.la) || 0);
     const w = winOf(id);
     const winPts = { easy: 40, likely: 25, risky: 5, unk: 10, avoid: -40 }[w.k];
-    const rich = Math.log10(1 + (p.nw || 0) / 1e6) * 10 + Math.log10(1 + salesIn(id, 48) / 1e5) * 10;
+    const up = unbankedPay(p);
+    const rich = Math.log10(1 + (p.nw || 0) / 1e6) * 10 + Math.log10(1 + salesIn(id, 48) / 1e5) * 10 + (up ? Math.log10(1 + up.cash / 1e5) * 10 : 0);
     return inact + winPts + rich;
   }
   async function searchGo() {
     const f = S.search;
     const runId = (view.runId = (view.runId || 0) + 1);
+    let scanNote = "";
+    if (f.ctypes.length) {
+      if (!apiKey()) return toast("Add an API key first", "bad");
+      view.results = { mode: "search", list: [] };
+      let sc;
+      try {
+        sc = await scanCompanies(f, runId);
+      } catch (e) {
+        setMsg(`<span class="r">Couldn't read companies: ${esc(e.message)}</span>`);
+        return;
+      }
+      if (!sc) return;
+      scanNote = `Read ${sc.checked} of ${sc.listed} ${f.ctypes.map(typeName).join(" / ")} companies (${sc.workers} workers)${sc.failed ? ` · <span class="r">${sc.failed} failed: ${esc(sc.lastErr)}</span>` : ""}. `;
+      if (!sc.workers && !sc.failed) scanNote += `<span class="r">Torn sent no worker lists.</span> `;
+    }
     const why = {};
     const all = Object.entries(DB).filter(([id, p]) => {
       const r = cheapFail(+id, p, f);
@@ -1991,12 +1940,12 @@
     if (!all.length) {
       view.results = { mode: "search", list: [] };
       const total = Object.keys(DB).length;
-      view.msg = total
+      view.msg = scanNote + (total
         ? `None of your <b>${total.toLocaleString()}</b> saved players pass the filters. Ruled out by: ${Object.entries(why)
             .sort((a, b) => b[1] - a[1])
             .map(([k, n]) => `<b>${esc(k)}</b> ${n.toLocaleString()}`)
             .join(" · ")}. <button class="link" data-act="searchReset">Reset filters</button>`
-        : "Your players list is empty. Tap '➕ Find more players' first.";
+        : "Your players list is empty. Tap '➕ Find more players' first.");
       drawResults();
       return;
     }
@@ -2027,6 +1976,7 @@
       nw: (a, b) => (DB[b.id].nw || 0) - (DB[a.id].nw || 0),
       level: (a, b) => (DB[a.id].lv || 999) - (DB[b.id].lv || 999),
       stats: (a, b) => statOf(a.id) - statOf(b.id),
+      unbanked: (a, b) => ((unbankedPay(DB[b.id] || {}) || {}).cash || 0) - ((unbankedPay(DB[a.id] || {}) || {}).cash || 0),
     };
     const sorter = () => list.sort(sorters[f.sort] || sorters.score);
     sorter();
@@ -2040,7 +1990,13 @@
       const sold = salesIn(r.id, 48);
       if (sold) bits.push("sold ~" + short(sold) + " in 48h");
       if (p.ml && now() - p.mlt < DAY) bits.push("listed " + short(p.ml) + " on Item Market");
-      return bits.join(" · ");
+      const up = unbankedPay(p);
+      if (up && up.days >= 2) {
+        const mLo = mugRange(up.cash * 0.5, up.co.type, up.co.stars),
+          mHi = mugRange(up.cash * 1.5, up.co.type, up.co.stars);
+        bits.unshift(`😴 Inactive <b>${Math.floor(up.days)}d</b> at ${esc(up.co.n || "")} (${up.co.stars}★)${up.paid < up.days ? ` · hired ${Math.floor(up.paid)}d ago` : ""} · est. unbanked pay ~<b>${short(up.cash * 0.5)}–${short(up.cash * 1.5)}</b>${mLo ? ` · mug ~${short(mLo[0])}–${short(mHi[1])}` : ""}<br>`);
+      }
+      return bits.join(" · ").replace("<br> · ", "<br>");
     };
     const recheck = (r) => {
       const p = DB[r.id] || {};
@@ -2069,8 +2025,8 @@
           .sort((a, b) => b[1] - a[1])
           .map(([k, n]) => `<b>${esc(k)}</b> ${n}`)
           .join(" · ");
-        const tip = f.ctype ? " Company type only matches players whose job is in that company type; few saved players qualify, so tap 'Find more players' a few times." : "";
-        return `${ok} of the top ${l.length} pass every filter (${all.length.toLocaleString()} matched the quick filters).${ruled ? " Ruled out by: " + ruled + "." : ""}${!ok ? tip : ""}`;
+        const tip = f.ctypes.length ? " Try more companies to read, 'Mix (all sizes)', or fewer inactive days." : "";
+        return `${scanNote}${ok} of the top ${l.length} pass every filter (${all.length.toLocaleString()} matched the quick filters).${ruled ? " Ruled out by: " + ruled + "." : ""}${!ok ? tip : ""}`;
       },
     });
   }
@@ -2315,18 +2271,16 @@
         await scanSales(true);
         toast(w3bStatus, "ok");
         break;
-      case "ctype": {
+      case "sctype": {
         const t = +el.dataset.id;
-        const L = S.sleep.types;
-        S.sleep.types = L.includes(t) ? L.filter((x) => x !== t) : [...L, t];
+        const L = S.search.ctypes;
+        S.search.ctypes = L.includes(t) ? L.filter((x) => x !== t) : [...L, t];
         save();
         el.classList.toggle("on");
+        const sm = el.closest("details").querySelector("summary");
+        sm.textContent = "Company types: " + (S.search.ctypes.length ? S.search.ctypes.map(typeName).join(", ") : "any");
         break;
       }
-      case "sleepGo":
-        if (!apiKey()) return toast("Add an API key first", "bad");
-        sleepGo();
-        break;
       case "searchGo":
         searchGo();
         break;
