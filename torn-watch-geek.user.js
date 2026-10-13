@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Watch Geek
 // @namespace    https://github.com/SarcasticGeekJr/torn-watch-geek
-// @version      1.7.0
+// @version      1.7.1
 // @description  Watch players (online, hospital, jail, flight landing times, bazaar and Item Market listings) and find mug targets: rich sellers, sleeping workers in high-paying companies, and your own advanced search, all with estimated battle stats and win chance. Built for Torn PDA, works in Tampermonkey too.
 // @author       SarcasticGeekJr
 // @match        https://www.torn.com/*
@@ -50,7 +50,7 @@
 
   // ---------------------------------------------------------------- config
   const PDA_KEY = "###PDA-APIKEY###"; // Torn PDA replaces this with your key at runtime
-  const VERSION = "1.7.0"; // keep in sync with @version above
+  const VERSION = "1.7.1"; // keep in sync with @version above
   const UPDATE_URL = "https://raw.githubusercontent.com/SarcasticGeekJr/torn-watch-geek/main/torn-watch-geek.user.js";
   const TORN = "https://api.torn.com";
   const FFS = "https://ffscouter.com/api/v1/get-stats";
@@ -920,8 +920,12 @@
   // "Landing window starts" alert (in the script, plus a Torn PDA phone notification set in advance).
   function landSoon(id, w) {
     const tr = w.trip;
+    // Wait for the background tracker's exact take-off times before alerting (they arrive a few seconds after Torn opens).
+    if (bgOn() && !bgSynced) return;
     const e = tr && tripEstimate(w);
     if (!e || e.unknown || !e.known || !e.single) return;
+    // A rough take-off ("between 1:00 and 2:15") gives an hour-wide range; an alert at its start would be far too early.
+    if (e.hi - e.lo > 20 * MIN) return;
     const t = now();
     if (!tr.soonAt && t >= e.lo && t <= e.hi) {
       tr.soonAt = t;
@@ -1332,7 +1336,8 @@
     const u = S.bgUrl.trim();
     return httpGet(u + (u.includes("?") ? "&" : "?") + params + "&_=" + now());
   }
-  let bgBusy = false;
+  let bgBusy = false,
+    bgSynced = false; // first sync this session done (or failed), so exact take-off times are in
   async function bgSync(force) {
     if (!bgOn() || bgBusy || (document.hidden && !force)) return;
     if (!force && now() - (BG.at || 0) < 90 * SEC) return;
@@ -1365,6 +1370,7 @@
       BG.err = e.message;
     } finally {
       bgBusy = false;
+      bgSynced = true;
       store.set("bg", BG);
     }
   }
@@ -1373,6 +1379,13 @@
     const bt = BG.trips[id];
     if (!bt || !trip || bt.key !== tripKey(trip) || !bt.depLo || now() - bt.depHi > 6 * HOUR) return;
     Object.assign(trip, { depLo: bt.depLo, depHi: bt.depHi, manual: false, bg: true, bound: false });
+    // Exact times moved the landing window: alert again at its real start.
+    const w = W[id];
+    const e = w && w.trip === trip ? tripEstimate(w) : null;
+    if (e && !e.unknown && e.lo > now()) {
+      trip.soonAt = 0;
+      trip.notifAt = 0;
+    }
     if (bt.plane && !trip.plane) trip.plane = bt.plane;
   }
   function applyBg(e) {
